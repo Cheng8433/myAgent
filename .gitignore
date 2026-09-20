@@ -1,0 +1,57 @@
+# ═══════════════════════════════════════════════════════════
+#  凭据 —— 最高优先级，永远不进仓库
+#  ncss 背后是主人的【实名学信网账号】，泄露后果远重于普通账号。
+#  提交前请习惯性跑一次 `git status` 自查。
+# ═══════════════════════════════════════════════════════════
+.env
+.env.*
+!.env.example
+
+# 登录态（Playwright storage_state / Cookie 导出）
+var/auth/
+*.storage_state.json
+storage_state*.json
+cookies*.txt
+
+# 私钥 / 证书
+*.pem
+*.key
+*.p12
+
+# ═══ 运行时数据（含原始抓取存档、日志、Trace、日报）═══
+var/*
+!var/.gitkeep
+
+# ═══ 数据库 ════════════════════════════════════════════════
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ═══ Python ════════════════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ═══ 工具缓存 ══════════════════════════════════════════════
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ═══ IDE / OS ══════════════════════════════════════════════
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
