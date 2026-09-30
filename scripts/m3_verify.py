@@ -13,12 +13,27 @@ import json
 import os
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import BaseModel
 
 import agent.tools.jobs  # noqa: F401  ← 触发真实工具注册
 from agent.llm.base import LLMResponse, ToolCall
+from agent.runtime.budget import Budget
 from agent.runtime.loop import _assistant_message, run_agent
 from agent.tools.registry import TOOLS, tool
+
+
+def budget_of(max_steps: int) -> Budget:
+    """只卡步数，把另外两道闸放到够不到的地方。
+
+    ★ M3 验的是【循环逻辑】，不是预算。token / wall 闸要是在这里生效，
+      测出来的就不是"循环该不该停"，而是"预算配得够不够大" ——
+      一个实验一次只动一个变量。
+      （#21 给 run_agent 换签名时漏改了这里，8 个调用点全 TypeError；
+       跑新脚本 m4_verify.py 是发现不了的，因为它传的是 budget=。）
+    """
+    return Budget(max_steps=max_steps, max_tokens=10**9, max_wall_seconds=1e9)
+
 
 # ══════════════════════════════════════════════════════════════
 #  测试替身
@@ -147,7 +162,7 @@ def check_happy_path() -> None:
     register_fake("fake_ok", {"ok": True, "items": ["a", "b"], "count": 2})
     llm = ScriptedLLM([wants(("fake_ok", "{}")), says("做完了")])
 
-    result = run_agent("随便干点什么", llm, tool_names=["fake_ok"], max_steps=4)
+    result = run_agent("随便干点什么", llm, tool_names=["fake_ok"], budget=budget_of(4))
 
     assert result.status == "success", f"应正常结束，实际 {result.status}"
     assert result.answer == "做完了"
@@ -204,7 +219,7 @@ def check_unknown_tool() -> None:
     register_fake("fake_ok", {"ok": True})
     llm = ScriptedLLM([wants(("查天气的tool", "{}")), says("好的")])
 
-    result = run_agent("随便", llm, tool_names=["fake_ok"], max_steps=4)
+    result = run_agent("随便", llm, tool_names=["fake_ok"], budget=budget_of(4))
 
     assert result.status == "success", "幻觉工具名不该让整个 run 崩掉"
     fed = last_tool_message(llm)
@@ -219,7 +234,7 @@ def check_invalid_args() -> None:
     register_fake("fake_page", {"ok": True}, args_model=_PageArgs)
     llm = ScriptedLLM([wants(("fake_page", "{这不是JSON")), says("好的")])
 
-    result = run_agent("随便", llm, tool_names=["fake_page"], max_steps=4)
+    result = run_agent("随便", llm, tool_names=["fake_page"], budget=budget_of(4))
 
     assert result.status == "success", "参数不合法不该让整个 run 崩掉"
     fed = last_tool_message(llm)
@@ -234,7 +249,7 @@ def check_tool_crash() -> None:
     register_fake("fake_boom", {"ok": True}, raises=RuntimeError("数据库连接断了"))
     llm = ScriptedLLM([wants(("fake_boom", "{}")), says("好的")])
 
-    result = run_agent("随便", llm, tool_names=["fake_boom"], max_steps=4)
+    result = run_agent("随便", llm, tool_names=["fake_boom"], budget=budget_of(4))
 
     assert result.status == "success", (
         f"单个工具崩溃不该让整个 run 死掉（实际 {result.status}）—— 整轮失败就什么都查不出来了"
@@ -253,7 +268,7 @@ def check_loop_detection() -> None:
     # 剧本给足 10 轮；如果循环没打断，它会一直问到剧本用完
     llm = ScriptedLLM([wants(("fake_fail", "{}")) for _ in range(10)])
 
-    result = run_agent("随便", llm, tool_names=["fake_fail"], max_steps=15, repeat_limit=2)
+    result = run_agent("随便", llm, tool_names=["fake_fail"], budget=budget_of(15), repeat_limit=2)
 
     assert result.status == "loop_detected", (
         f"应触发死循环检测，实际 {result.status} —— 循环在拿钱空转"
@@ -270,7 +285,7 @@ def check_repeat_limit_is_configurable() -> None:
     register_fake("fake_fail", {"ok": False, "error": "boom", "hint": "没救了"})
     llm = ScriptedLLM([wants(("fake_fail", "{}")) for _ in range(10)])
 
-    result = run_agent("随便", llm, tool_names=["fake_fail"], max_steps=15, repeat_limit=3)
+    result = run_agent("随便", llm, tool_names=["fake_fail"], budget=budget_of(15), repeat_limit=3)
 
     assert result.status == "loop_detected", f"应触发死循环检测，实际 {result.status}"
     # ★ 这里卡 3 不卡 2：写死 2 的实现在上一项照样过，只有参数一变才露馅。
@@ -287,7 +302,7 @@ def check_max_steps() -> None:
     # 每轮参数都不同 —— 这是【合法】的连续调用（比如翻页），不该被当成打转
     llm = ScriptedLLM([wants(("fake_page", json.dumps({"page": i}))) for i in range(1, 11)])
 
-    result = run_agent("随便", llm, tool_names=["fake_page"], max_steps=3, repeat_limit=2)
+    result = run_agent("随便", llm, tool_names=["fake_page"], budget=budget_of(3), repeat_limit=2)
 
     assert result.status == "max_steps_exceeded", (
         f"应撞上步数上限，实际 {result.status} —— 是不是把「连续相同」写成了「累计」？"
@@ -296,11 +311,18 @@ def check_max_steps() -> None:
     print("  翻页式调用没被误判，第 3 轮撞上限正常退出 ✓")
 
 
-def check_real_tool() -> None:
+def check_real_tool() -> bool:
+    """真实链路只有这一项验得到。返回 True 表示【真的验过了】。
+
+    ★ 这里曾经写的是 `print("跳过：没有 LLM_API_KEY")` + return —— 而且脚本
+      压根没调 load_dotenv()，于是 .env 里明明有 key，这一项也永远"跳过"，
+      末尾照样打 ✅。两处毛病叠在一起就成了【假绿灯】：绿的是"其余 7 项"，
+      读的人却以为是"整条链路"。跳过必须是响的，不是哑的。
+    """
     print("\n═══ 8. 真实工具体验（走真模型，验真链路）═══")
     if not os.environ.get("LLM_API_KEY"):
-        print("  跳过：没有 LLM_API_KEY")
-        return
+        print("  ✗ 未验证：环境里没有 LLM_API_KEY（.env 里有的话，检查 load_dotenv 调了没）")
+        return False
 
     from agent.llm.openai_compat import OpenAICompatProvider
 
@@ -310,15 +332,21 @@ def check_real_tool() -> None:
         "拉取招聘列表第 1 页，只列 3 个公司名，不要展开。",
         llm,
         tool_names=["fetch_job_list"],
-        max_steps=6,
+        budget=budget_of(6),
     )
     print(f"  status={result.status}  步数={len(result.steps)}")
     print(f"  token={result.prompt_tokens}+{result.completion_tokens}")
     print(f"  回答：{result.answer[:160]}")
     assert result.status == "success", f"真实链路没走通：{result.status}"
+    print("  ✓ 真模型 + 真工具 + 真循环，端到端走通")
+    return True
 
 
 def main() -> None:
+    # ★ 先 load_dotenv：上面那个"没 key 就跳过"的分支，之前因为缺这一行
+    #   而永远成立 —— 环境变量只在 .env 里，os.environ 里当然没有。
+    load_dotenv()
+
     check_assistant_message_shape()
     check_happy_path()
     check_unknown_tool()
@@ -327,8 +355,11 @@ def main() -> None:
     check_loop_detection()
     check_repeat_limit_is_configurable()
     check_max_steps()
-    check_real_tool()
-    print("\n✅ M3 通过：循环的出口、回灌、以及三种终止条件都守住了。")
+    if not check_real_tool():
+        # ★ 退出码 2 而不是 0：没验过 ≠ 通过。让 CI / 一眼扫过的人都看得见。
+        print("\n⚠️ 前 7 项通过，但【端到端链路未验证】—— 这不是全绿。")
+        raise SystemExit(2)
+    print("\n✅ M3 通过：循环的出口、回灌、三种终止条件、以及真实链路都守住了。")
 
 
 if __name__ == "__main__":

@@ -42,6 +42,13 @@
 | 异常判定 | 判断某条招聘信息是否「异常」（可疑、重复、信息缺失） | 语义判断，规则难覆盖 |
 | 日报摘要 | 把结构化数据写成一段自然语言日报 | 语言生成 |
 
+> ⏸ **2026-09-23：「异常判定」暂缓实现。**
+> 理由：remoteok 的数据是干净的（字段齐全、无重复、无脏标题），**没有真实场景能触发这一步**。
+> 硬造一份脏数据 fixture 来"演出"这个环节，验的是我们自己的想象，不是真实需要 ——
+> 一个空跑的 LLM 出场点比没有更坏：多一次调用、多一处不确定性、多一段要维护的提示词。
+> 等 M2b 换上 ncss（真实站点、真实改版、真实脏数据）之后若发现确实需要，再补。
+> 这张表【刻意留着这一行】—— 让"少做了一件事"保持可见，而不是让它静悄悄地消失。
+
 其余 90% 的代码是**普通 Python**。这就是「工程」。
 
 > **面试价值**：能主动说出「我没用 Agent 跑全流程，因为流程是确定的，LLM 只做判断」——这句话的含金量远高于「我用了 LangGraph」。
@@ -551,6 +558,27 @@ def run_agent(task: str, ctx: "RunContext", max_steps: int = 20) -> dict:
     return ctx.finish("max_steps_exceeded")
 ```
 
+> **2026-09-30 实现时改了四处（M3/M4a 对账 —— 这段骨架照抄会撞墙，原因都记在这）。**
+> 1. **签名**：`run_agent(task, ctx, max_steps=20)` → `run_agent(task, llm, *, tool_names, budget, repeat_limit=2)`。
+>    `ctx`（RunContext）没建 —— 它装的是 trace / policy，属于 M6/M8。
+>    `tool_names` 显式传入是有意的：这就是 M8 白名单、M4b 分阶段放权的插口，
+>    不许写成"注册了就能调"。
+> 2. **预算**：`ctx.budget.exhausted()` + `charge(usage)` → 纯函数 `Budget.exceeded(*, steps, tokens, wall_seconds)`。
+>    理由：loop.py **本来就在**累加 token（RunResult 要汇总），Budget 自己再记一份就是**两本账** ——
+>    迟早对不上，而且"忘了 charge 某一处"是个**不报错**的 bug。所以：账只一本（loop 的局部变量），
+>    判断只一处（budget.py）。
+>    连带：`ctx.finish("budget_exhausted")` 这一个笼统代号，拆成了三个按
+>    `f"{闸门名}_exceeded"` 机械推导的 status（max_steps / max_tokens / wall_clock）——
+>    撞哪道闸指向完全不同的修法，不该压成一个词。
+> 3. **超时与重试的位置**：`ctx.call_tool(...)` 后面那句"超时 + 重试 + 脱敏都在这"是**错的**。
+>    只有**超时**能包在那一层（它不需要异常，只问"返回了吗"）；
+>    **重试必须落在工具内部**（`tools/jobs.py`），因为异常在那里就被翻译成 `{"ok": false}` 了，
+>    包在外面的重试永远等不到异常 —— 实测过：`httpx.get` 只被调用 1 次，
+>    而返回的 hint 自己还写着"可以重试"。脱敏属于 M8，也还没写。
+> 4. **循环形状**：`for step in range(max_steps)` → `range(1, HARD_STEP_CEILING + 1)`，闸门在**循环体内、
+>    调用模型之前**判。"步数用完就停"和"每轮开头判一次闸"是两件事；而 `HARD_STEP_CEILING`(1000)
+>    是**护栏不是策略**，所以硬编码、不做成配置项 —— 策略可配、护栏不可配。
+
 ### 终止条件（必须全部实现）
 
 | 条件 | 说明 |
@@ -576,6 +604,14 @@ def run_agent(task: str, ctx: "RunContext", max_steps: int = 20) -> dict:
 ---
 
 ## M4 · 编排加固：重试、超时、分支
+
+> **2026-09-23 重切（M4 → M4a + M5 + M4b）。**
+> 原因：本节下面的 `run_daily_report` 骨架是**终态速写**，6 行里 4 行依赖还没建的里程碑
+> （`ensure_session` → M2b、`upsert_jobs` → M5、`send_feishu` → M8）。
+> 照抄会撞一鼻子灰，而且 `upsert_jobs` 若先用内存替身搭一遍、M5 再拆掉，是纯浪费。
+> 所以：**M4a = 加固层**（重试 / 超时 / 预算，不依赖任何未建模块，当天可验收），
+> **M5 = 状态管理**（SQLite），**M4b = 本节这个确定性骨架**（等 `upsert_jobs` 有真身再写）。
+> 本节的「学什么」与「重试策略表」属于 M4a，「确定性主流程」属于 M4b。
 
 ### 学什么
 - 哪些操作可以重试（幂等性），哪些绝不能

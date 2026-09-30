@@ -9,9 +9,22 @@
 
 import os
 
-from agent.tools.sources.base import Job, JobSource, LoginExpired, SourceError
+from agent.tools.sources.base import (
+    Job,
+    JobSource,
+    LoginExpired,
+    SourceError,
+    TransientSourceError,
+)
 
-__all__ = ["Job", "JobSource", "LoginExpired", "SourceError", "get_source"]
+__all__ = [
+    "Job",
+    "JobSource",
+    "LoginExpired",
+    "SourceError",
+    "TransientSourceError",
+    "get_source",
+]
 
 
 def get_source() -> JobSource:

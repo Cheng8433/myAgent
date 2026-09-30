@@ -73,6 +73,26 @@ class LoginExpired(SourceError):
     """
 
 
+class TransientSourceError(SourceError):
+    """【瞬时】故障：超时、连接中断、5xx。
+
+    ★ 单独立这个类型，是为了让重试层能分辨"值得再试一次"和"再试也是白搭"。
+
+      现在 remoteok.py 把所有 httpx.HTTPError 囫囵包成一个 SourceError ——
+      于是 404（页面/接口没了，永久）和超时（网络抖了，瞬时）被同一个
+      类型吸收。重试层拿到一个 SourceError，**无法判断该不该重试**，
+      只能二选一：全都重试（404 也重试 3 次，浪费 7 秒、多打 3 个请求，
+      对被抓的站点很不礼貌），或全都不重试（网络抖一下整份日报就废了）。
+
+      两个都不对，所以要把"瞬时不瞬时"这个信息，从抛出的那一刻就带上。
+
+    ★ 为什么不给 SourceError 加一个 `retryable: bool` 字段，而用子类？
+      因为 `except` 是按类型匹配的。子类让"哪些错误值得重试"变成一个
+      **可以写在 except 子句里的问题**（`except TransientSourceError`），
+      而字段需要先捕获、再读值、再分支 —— 多三步，且忘了一步就静默走错。
+    """
+
+
 class JobSource(Protocol):
     """所有数据源实现都要满足的协议（鸭子类型，无需继承）。"""
 

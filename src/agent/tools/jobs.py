@@ -24,6 +24,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from agent.runtime.retry import policy_for, retry_call
 from agent.tools.registry import tool
 from agent.tools.sources import LoginExpired, SourceError, get_source
 
@@ -50,7 +51,21 @@ def fetch_job_list(page: int = 1) -> dict[str, Any]:
     try:
         page = max(1, page)
         source = get_source()
-        jobs = source.list_jobs(page=page)
+        # ★ 重试必须放在【这里】，不能放在 loop.py。位置的道理是 M4a 的核心：
+        #   异常一旦被下面那个 except 翻译成返回值，"重试"这件事就不存在了 ——
+        #   loop.py 看到的是 {"ok": false}，retry_call 永远等不到异常。
+        #   实测过：ConnectTimeout 时 httpx.get 只被调用 1 次，
+        #   而返回的 hint 自己还写着"可以重试"。
+        #   （同一条纪律的另一半：超时可以包在外面，因为它不需要异常。）
+        #
+        # ⚠️ 已知重复：side_effect="read" 在上面的装饰器上声明了一次，这里又写了第二次。
+        #   同一个事实有两个出处 —— 想彻底消掉，得把"吃异常"这件事上移到 @tool
+        #   装饰器上（它同时知道 side_effect 和 timeout）。
+        #   现在不做：一次只动一个变量。这是记在账上的债，不是忘了。
+        jobs = retry_call(
+            lambda: source.list_jobs(page=page),
+            policy=policy_for("read"),
+        )
         # Job 是我们自己的对象，必须转成原生 dict 才能回灌给模型。
         # （和 M1「arguments 别急着解析」方向相反，但理由不冲突：
         #   那边是「别替上层做决定」，这边是「必须变成文本才能喂给模型」。）

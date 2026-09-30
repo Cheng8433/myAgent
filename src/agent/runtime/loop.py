@@ -21,21 +21,39 @@
 
 ★ 判据永远是 tool_calls，不是 content —— M1 的 wants_tools 就是为这一行准备的。
 
+已接上（M4a）：
+  · 预算闸门（Budget）—— 每轮开头判一次，三道闸的定义见 budget.py。
+  · 工具超时 —— spec.timeout 终于被消费，见下面的 _call_tool。
+  · 退避重试 —— 不在这里，在【工具层】（jobs.py）。位置的道理见那里的注释：
+    异常一旦被翻译成返回值，"重试"就不存在了，所以重试必须落在翻译之前。
+
 尚未实现（后面的里程碑负责，现在【别】做）：
-  · 预算闸门（token / 金额 / 墙钟时间）→ M4
-  · 工具超时与退避重试                → M4
   · 每步落 JSONL trace                → M6
   · 工具白名单与权限                  → M8
 """
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
 
 from agent.llm.base import LLMProvider, LLMResponse
-from agent.tools.registry import TOOLS, openai_tools
+from agent.runtime.budget import Budget
+from agent.tools.registry import TOOLS, ToolSpec, openai_tools
+
+HARD_STEP_CEILING = 1000
+"""轮数的【护栏】，不是策略 —— 所以硬编码，不做成配置项。
+
+闸门（Budget.max_steps）是可以配错、也可以写错的策略；这个数不许失败：
+它唯一的作用是"闸门自己坏了，也不会无限烧钱"。正常路径永远撞不到它，
+撞到了就说明闸门那段代码有 bug。
+
+★ 别"顺手"把它也读成环境变量 —— 策略可配、护栏不可配。
+  同一条原则在 .env.example 里已经用过一次（"一天只跑一次"的上限）。"""
 
 SYSTEM_PROMPT = """你是一个招聘信息处理助手。
 
@@ -65,13 +83,62 @@ class StepRecord:
 
 @dataclass(frozen=True)
 class RunResult:
-    """一次 run 的结局。status 是三个终止条件之一的代号。"""
+    """一次 run 的结局。status 是一个【封闭词汇表】里的代号（见下）。"""
 
-    status: str  # success | max_steps_exceeded | loop_detected
+    status: str
+    # ↑ 封闭集合，不是自由字符串 —— 多一个拼写就多一条永远匹配不上的分支，
+    #   而且不会报错，只会让下游统计悄悄少一块。词汇表：
+    #     success               正常答完
+    #     loop_detected         连续 repeat_limit 轮同签名
+    #     max_steps_exceeded    撞 Budget.max_steps（也兜 HARD_STEP_CEILING）
+    #     max_tokens_exceeded   撞 Budget.max_tokens
+    #     wall_clock_exceeded   撞 Budget.max_wall_seconds
+    #   后三条由 f"{闸门名}_exceeded" 机械推导，闸门名定义在 budget.py。
+    #   scripts/m4_verify.py 的第 ⑥ 项会盯着这张表。
     answer: str = ""
     steps: tuple[StepRecord, ...] = ()
     prompt_tokens: int = 0
     completion_tokens: int = 0
+
+
+def _call_tool(spec: ToolSpec, kwargs: dict[str, Any]) -> Any:
+    """执行工具，最多等 spec.timeout 秒。超时则返回一条可回灌的 ok=false。
+
+    ★ 超时只能做到「我停止等待」，做不到「它停止了」—— Python 无法在安全的
+      前提下杀掉一个线程。所以超时之后那个卡住的调用【仍在后台跑】，只是我们
+      不再等它。这是物理限制，写在这里免得将来被当成 bug。
+      连带后果：concurrent.futures 的工作线程是 non-daemon，解释器退出时会
+      join 它们 —— 一个卡死的工具仍可能拖住进程退出。要根治得上进程池
+      （贵得多，还要序列化参数与返回值），现在不值这个价。
+
+    ★ 内层/外层的分工：httpx 自己带 timeout（见 RemoteOkSource._timeout），
+      网络卡住时它先抛 —— 那层【能归因】（"是哪次请求超时了"）。这里的
+      spec.timeout 是【外层兜底】，防的是 httpx 之外的东西卡住（数据库锁、
+      浏览器等待……）。两层都有才是纵深防御，只留一层就会在另一类故障上瞎掉。
+
+    ★ 踩过的坑，别再踩：不要写 `with ThreadPoolExecutor(...) as pool:`。
+      它的 __exit__ 会 shutdown(wait=True) —— 也就是原地等那个卡住的调用结束，
+      超时形同虚设。必须显式 shutdown(wait=False)。
+    """
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool:{spec.name}")
+    try:
+        future = pool.submit(spec.fn, **kwargs)
+        try:
+            return future.result(timeout=spec.timeout)
+        except FuturesTimeoutError:
+            # 已经跑起来的任务 cancel() 不掉，这里只是尽力而为。
+            future.cancel()
+            return {
+                "ok": False,
+                "error": "tool_timeout",
+                "hint": (
+                    f"{spec.name} 超过 {spec.timeout}s 没返回，已放弃等待"
+                    "（它可能仍在后台运行）。不要用同样的参数重试，"
+                    "先报告这个工具暂时不可用。"
+                ),
+            }
+    finally:
+        pool.shutdown(wait=False)
 
 
 def run_agent(
@@ -79,7 +146,7 @@ def run_agent(
     llm: LLMProvider,
     *,
     tool_names: list[str],
-    max_steps: int = 15,
+    budget: Budget,
     repeat_limit: int = 2,
 ) -> RunResult:
     """跑一轮 ReAct，直到模型不再要工具、或撞上终止条件。
@@ -100,7 +167,28 @@ def run_agent(
     # 死循环检测：按顺序记下每轮请求的"签名"，用来发现原地打转。
     signatures: list[str] = []
 
-    for step in range(1, max_steps + 1):
+    started = time.monotonic()
+
+    for step in range(1, HARD_STEP_CEILING + 1):
+        # ── 预算闸门：必须在本轮 llm.chat() 【之前】 ──
+        # 放在调用之后就是为时已晚 —— 闸门的目的是"别再花下一次钱"。
+        # ★ 不对称（写在这里免得将来被当成 bug）：此处读到的是【上一轮结束时】
+        #   的用量，所以最多超支一轮。这是物理限制（用量只有调用返回后才知道），
+        #   不是漏判。
+        gate = budget.exceeded(
+            steps=step - 1,  # 已经跑完的轮数（不是正要跑的这一轮）
+            tokens=prompt_tokens + completion_tokens,  # 账只有这一本，见 budget.py
+            wall_seconds=time.monotonic() - started,  # monotonic，不是 time.time()
+        )
+        if gate is not None:
+            return RunResult(
+                status=f"{gate}_exceeded",  # 由闸门名机械推导，不查映射表
+                answer="",
+                steps=tuple(records),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
         # ── Reason ──
         # 判据用 wants_tools，不看 content 空不空：content 可能只是一句开场白
         # （"我来查一下"），非空不代表答完。M1 把它做成属性，就是为了让
@@ -164,7 +252,7 @@ def run_agent(
                     }
                 else:
                     try:
-                        result = spec.fn(**parsed.model_dump())
+                        result = _call_tool(spec, parsed.model_dump())
                     except Exception as e:
                         # 这里兜的是【我们自己代码的 bug】：SourceError / LoginExpired
                         # 已经在工具层（jobs.py）被翻译成返回值了，循环收不到它们；

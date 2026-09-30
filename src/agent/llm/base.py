@@ -9,6 +9,8 @@
 
 ⚠️ 纪律：本模块【禁止】import openai / httpx 或任何厂商 SDK。
    一旦 import 了，这层抽象就是假的 —— 因为它开始依赖某个具体厂商。
+
+   同理，各实现类【必须】把厂商异常翻译成下面的 LLMError 子类再抛。
 """
 
 from dataclasses import dataclass, field
@@ -69,6 +71,41 @@ class LLMResponse:
         return bool(self.tool_calls)
 
 
+class LLMError(Exception):
+    """LLM 层一切失败的基类 —— 与厂商无关的错误词汇表。
+
+    ★ 存在的理由，与 remoteok.py 里那条 httpx 归一化是同一条纪律：
+      「厂商 SDK 的异常类型不许漏到上层」。
+    """
+
+
+class LLMTransientError(LLMError):
+    """瞬时故障：超时、连接中断、5xx。重试【有意义】。"""
+
+
+class LLMPermanentError(LLMError):
+    """永久故障：401 鉴权失败、400 请求体不合法、模型名不存在。
+
+    重试纯属浪费 —— 同一份请求再发一次，结果一定还是这个错。
+    ★ 这个类最大的价值是【省下不需要的重试】：它让"别重试"成为
+      一个显式的决定，而不是靠"重试次数用完了"来兜。
+    """
+
+
+class LLMRateLimited(LLMTransientError):
+    """429 限流：瞬时，但【必须听服务端的】，不能用自己算的退避表。
+
+    ★ 和别的瞬时错误不一样：服务端在 Retry-After 头里明确说了
+      "等这么久再来"。自己硬算可能回去得太早、又被拒一次；
+      但也不能无条件照单全收（对方可能说 3600 秒），得设上限。
+    """
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+        """服务端要求的等待秒数；None = 对方没说，回退到自己的退避表。"""
+
+
 class LLMProvider(Protocol):
     """所有 LLM 供应商实现都要满足的协议。
 
@@ -86,7 +123,9 @@ class LLMProvider(Protocol):
         契约（三条，都很重要）：
         1. **不重试**（超时除外）。重试属于编排层，M4 统一管 ——
             否则重试会散落在各层，无法统一退避策略与幂等判断。
-        2. **不吞异常**。失败就抛，让上层决定是重试、降级还是告警。
+        2. **不吞异常，但必须归一化**。失败就抛 —— 抛的必须是上面那几个
+            LLMError 子类，绝不能是厂商 SDK 的异常类型。
+            让上层决定是重试、降级还是告警；但上层不该知道您用的是哪家 SDK。
         3. **必须回填真实 token 用量**。M6 成本归因依赖它。
 
         注意：`timeout` 不在这里做参数，由实现类从配置读取

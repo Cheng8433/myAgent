@@ -18,7 +18,7 @@
 
 import httpx
 
-from agent.tools.sources.base import Job, SourceError
+from agent.tools.sources.base import Job, SourceError, TransientSourceError
 
 API_URL = "https://remoteok.com/api"
 
@@ -43,11 +43,19 @@ class RemoteOkSource:
                 follow_redirects=True,
             )
             resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            # ★ 异常归一化：httpx 的类型不许漏到上层（契约第 2 条）。
-            #   包成 SourceError 之后，上层不必 import httpx 就能处理失败。
-            raise SourceError(f"remoteok 请求失败：{exc}") from exc
-
+        except httpx.TransportError as exc:
+            raise TransientSourceError(f"remoteok 网络抖动，可以重试：{exc}") from exc
+        except httpx.HTTPStatusError as status_err:
+            status_code = status_err.response.status_code
+            if status_code in (429, 408) or 500 <= status_code < 600:
+                raise TransientSourceError(
+                    f"HTTP {status_code}：remoteok 服务器异常，可以重试"
+                ) from status_err
+            raise SourceError(
+                f"HTTP {status_code}：remoteok 访问异常，不可重试：{status_err}"
+            ) from status_err
+        except httpx.HTTPError as error:
+            raise SourceError(f"网络连接异常，请查看日志：{error}") from error
         raw = resp.json()
         rows = [r for r in raw if r.get("position") and r.get("id")]
 
