@@ -161,6 +161,16 @@ def main() -> None:
         f"模型还想点单（{len(resp2.tool_calls)} 单），循环该继续而不是结束"
     )
     assert resp2.content, "循环终止了，但 content 是空的 —— 没有答案可交付"
+
+    # ── 考点 5：不点单时 tool_calls 必须是【可遍历的空 list】，不是 None ──
+    #   契约在 llm/base.py：field(default_factory=list)。
+    #   ★ 这条【不会】被考点 4 抓到：wants_tools 是 bool(self.tool_calls)，
+    #     若它是 None 则 bool(None) 为 False —— 考点 4 照样通过，
+    #     而下游 loop.py 的 `for tc in resp.tool_calls` 会当场 TypeError。
+    #     所以它必须单独存在。（吸收自 scripts/_check_abstraction.py，原件已删。）
+    assert isinstance(resp2.tool_calls, list), (
+        f"tool_calls 应是 list（可以为空），实际 {type(resp2.tool_calls).__name__}"
+    )
     assert resp2.prompt_tokens > 0 and resp2.completion_tokens > 0, (
         "用量没回填。M6 的成本归因全靠这两个数，Provider 不许偷懒"
     )

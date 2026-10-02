@@ -58,18 +58,22 @@ class Budget:
     def from_env(cls) -> Budget:
         """从 .env 读三道闸。变量名与 .env.example 一致。
 
-        TODO A —— 请实现（记得 import os）：
-          AGENT_MAX_STEPS / AGENT_MAX_TOKENS / AGENT_WALL_CLOCK_SECONDS
-          （int / int / float，缺省值就用上面类字段的那三个数）
+        三条纪律（都不是风格问题，各自对应一类静默 bug）：
+        · 缺省值取自上面的类字段（cls.max_steps …），不再抄一遍数字 ——
+          同一个默认值写两处的话，改了字段忘了字符串，就会出现
+          "有 .env 时一套上限、没 .env 时另一套"，而且【不报错】。
+        · 变量存在但为空（`AGENT_MAX_STEPS=`）时抛错，不静默退回默认值。
+          一个被拼错的预算悄悄变成默认值，就是"少算的账本"。
+        · 解析失败时把变量名写进消息：int() 自带的
+          "invalid literal for int() with base 10: 'abc'"【没说是哪个变量】，
+          配置错了却看不出是谁错了 —— M4a-1 那个"归因错位"的同一个病。
 
-        ★ 一处要想清楚的地方：变量值填错时（AGENT_MAX_TOKENS=abc），
-          int() 会抛 "invalid literal for int() with base 10: 'abc'" ——
-          这条消息【没说是哪个变量】。配置错了却看不出是谁错了，
-          正是 M4a-1 那个"归因错位"的同一个病。
-          所以要么在这里包一层、把变量名写进消息里，要么想清楚
-          "反正启动时就炸，人总会去翻 .env"是不是就够了。
-          两种都行，但请您选一个并写下理由 —— 别默认成第三种（静默回退到
-          默认值）：一个被拼错的预算悄悄变成默认值，就是"少算的账本"。
+        ⚠️ 兜底必须写 cls.max_steps，不能写裸 max_steps：类属性不在方法的
+           名字作用域里，而该行有赋值会让它被认成【局部变量】，变量缺失时
+           抛 UnboundLocalError —— 且在有 .env 时【不报错】（or 左边为真，
+           右边不求值），本机全绿、CI 上炸。实测确认。
+
+        断言在 scripts/m4_verify.py 第 ⑦ 节。
         """
         load_dotenv()
         # ★ 兜底取 cls.max_steps，不能写裸 max_steps：
@@ -102,19 +106,19 @@ class Budget:
     def exceeded(self, *, steps: int, tokens: int, wall_seconds: float) -> str | None:
         """三道闸依次判，返回【第一个】撞破的闸门名；都没撞破返回 None。
 
-        TODO B —— 请实现。三条判据：
+        判据（三个参数都是【当前值】，不是增量 —— 判断题的输入）：
             steps        >= max_steps         → GATE_MAX_STEPS
             tokens       >= max_tokens        → GATE_MAX_TOKENS
             wall_seconds >= max_wall_seconds  → GATE_WALL_CLOCK
 
-        ★ 三个参数都是【当前值】，不是增量 —— 判断题的输入。
-          steps 传的是"已经跑了几轮"（从 1 开始数），tokens 传的是
-          "prompt + completion 的累计值"。
-
-        ★ 顺序没变（steps → tokens → wall）但请想一下为什么【必须】定死一个
-          顺序：两道闸同时撞破时，返回哪个完全由顺序决定。乱序 = 结果不可复现
-          = 测不出也复现不了。要是您觉得该换个顺序（比如 wall 放最前，
-          因为"卡住"比"贵"更值得优先报），改就是了，但要在注释里写下理由。
+        ★ steps 传"【已经跑完】几轮"（loop.py 传的是 step - 1），
+          tokens 传"prompt + completion 的累计值"。传错一个是 off-by-one，
+          闸门就会早停或多跑一轮。
+        ★ 顺序（steps → tokens → wall）是【契约的一部分】，不是随手排的：
+          两道闸同时撞破时，返回哪个完全由顺序决定，而乱序 = 结果不可复现
+          = 测不出也复现不了。想换顺序（比如 wall 放最前，因为"卡住"比"贵"
+          更值得优先报）可以，但要在注释里写下理由。
+          断言在 scripts/m4_verify.py 第 ⑤ 项 —— 两个方向都测了。
         """
         if steps >= self.max_steps:
             return GATE_MAX_STEPS

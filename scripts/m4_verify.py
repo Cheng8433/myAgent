@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from unittest.mock import patch
 
@@ -195,6 +196,48 @@ for b in (
     observed.add(run_with(RoundScript(), b).status)
 bogus = observed - SEEN
 check("多出来的 status", bogus or "（无）", "（无）", "既有 max_steps_exceeded，别造出第二个写法")
+
+print("\n⑦ from_env：读环境变量；兜底值与类字段【同一个出处】")
+# ★ 这一节补的是"声明了但没人消费"的另一面：from_env() 自从写出来就没有
+#   任何断言在盯它 —— 而没有断言 = 改坏了也不会有人知道。
+#   假时钟在这里帮不上忙，要假的是【环境】：用 patch 把 load_dotenv 顶掉，
+#   否则 .env 里的值会盖住"变量缺失"那条路 —— 正是它掩盖过一个真 bug
+#   （裸 max_steps 引出的 UnboundLocalError，有 .env 时不报错）。
+no_dotenv = patch("agent.runtime.budget.load_dotenv")
+
+with no_dotenv, patch.dict(os.environ, {}, clear=True):
+    b = Budget.from_env()
+    check(
+        "三个变量都缺失 → 取类字段默认值",
+        (b.max_steps, b.max_tokens, b.max_wall_seconds),
+        (Budget().max_steps, Budget().max_tokens, Budget().max_wall_seconds),
+        "这就是「同一个出处」的可执行定义",
+    )
+
+with (
+    no_dotenv,
+    patch.dict(
+        os.environ,
+        {"AGENT_MAX_STEPS": "7", "AGENT_MAX_TOKENS": "1234", "AGENT_WALL_CLOCK_SECONDS": "2.5"},
+    ),
+):
+    b = Budget.from_env()
+    check("三个变量都在 → 照读", (b.max_steps, b.max_tokens, b.max_wall_seconds), (7, 1234, 2.5))
+
+with no_dotenv, patch.dict(os.environ, {"AGENT_MAX_STEPS": ""}):
+    try:
+        Budget.from_env()
+    except ValueError as exc:
+        # ★ 附带卡住消息里有没有变量名：int("") 自带的报错【不说是哪个变量】，
+        #   配置错了却看不出谁错了，就是 M4a-1 那个归因错位。
+        check(
+            "变量为空串 → 抛错、不静默回退",
+            "AGENT_MAX_STEPS" in str(exc),
+            True,
+            "空串悄悄退回默认值 = 少算的账本",
+        )
+    else:
+        check("变量为空串 → 抛错、不静默回退", "没炸", "ValueError")
 
 # ══════════════════════════════════════════════════════════════
 #  工具超时 + 退避重试
