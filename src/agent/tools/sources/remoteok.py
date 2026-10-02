@@ -18,7 +18,7 @@
 
 import httpx
 
-from agent.tools.sources.base import Job, SourceError, TransientSourceError
+from agent.tools.sources.base import Job, JobPage, SourceError, TransientSourceError
 
 API_URL = "https://remoteok.com/api"
 
@@ -34,7 +34,7 @@ class RemoteOkSource:
     def __init__(self, *, timeout: float = 30.0) -> None:
         self._timeout = timeout
 
-    def list_jobs(self, *, page: int = 1, limit: int = 20) -> list[Job]:
+    def list_jobs(self, *, page: int = 1, limit: int = 20) -> JobPage:
         try:
             resp = httpx.get(
                 API_URL,
@@ -56,8 +56,14 @@ class RemoteOkSource:
             ) from status_err
         except httpx.HTTPError as error:
             raise SourceError(f"网络连接异常，请查看日志：{error}") from error
-        raw = resp.json()
-        rows = [r for r in raw if r.get("position") and r.get("id")]
+        # ★ 先留一份【未解析】的原文再动它。
+        #   resp.content 是字节，resp.json() 是解析结果 —— 存档要的是前者：
+        #   解析一旦发生就丢信息（这里就丢了那个声明对象，见下面两行），
+        #   而"排查时看完整原文"正是存档存在的唯一理由。
+        #   （两个都取不会多发一次请求：httpx 拿到完整响应后才让我们走到这里。）
+        body = resp.content
+        payload = resp.json()
+        rows = [r for r in payload if r.get("position") and r.get("id")]
 
         # 完成分页
         offset = (page - 1) * limit
@@ -87,4 +93,4 @@ class RemoteOkSource:
                     },
                 )
             )
-        return jobs
+        return JobPage(jobs=jobs, raw=body)

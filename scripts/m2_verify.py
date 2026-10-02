@@ -14,7 +14,7 @@
 import agent.tools.jobs as jobs_mod  # ← 必须 import，@tool 才会在 import 时注册
 from agent.tools.jobs import fetch_job_list
 from agent.tools.registry import TOOLS, openai_tools
-from agent.tools.sources.base import LoginExpired, SourceError
+from agent.tools.sources.base import JobPage, LoginExpired, SourceError
 
 EXPECTED_ITEM_KEYS = {
     "source",
@@ -104,7 +104,7 @@ class _Boom:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    def list_jobs(self, *, page: int = 1, limit: int = 20) -> list:
+    def list_jobs(self, *, page: int = 1, limit: int = 20) -> JobPage:
         raise self._exc
 
 

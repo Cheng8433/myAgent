@@ -62,14 +62,21 @@ def fetch_job_list(page: int = 1) -> dict[str, Any]:
         #   同一个事实有两个出处 —— 想彻底消掉，得把"吃异常"这件事上移到 @tool
         #   装饰器上（它同时知道 side_effect 和 timeout）。
         #   现在不做：一次只动一个变量。这是记在账上的债，不是忘了。
-        jobs = retry_call(
+        job_page = retry_call(
             lambda: source.list_jobs(page=page),
             policy=policy_for("read"),
         )
         # Job 是我们自己的对象，必须转成原生 dict 才能回灌给模型。
         # （和 M1「arguments 别急着解析」方向相反，但理由不冲突：
         #   那边是「别替上层做决定」，这边是「必须变成文本才能喂给模型」。）
-        items = [asdict(job) for job in jobs]
+        items = [asdict(job) for job in job_page.jobs]
+
+        # ⚠️ job_page.raw 在这里【故意没有去处】，别顺手把它塞进返回值：
+        #   那是 627 KB 的原文，进了 messages 就是当场烧穿上下文预算。
+        #   它该去的是 var/raw/ 的存档 + jobs 表的 raw_path —
+        #   而这条线要等 M5c 把 run_id 造出来才接得上（存档路径要 run_id）。
+        #   到那时这两行会变成 upsert_jobs(conn, job_page.jobs, raw=job_page.raw, ...)
+        #   所以它不是一个"忘了接"的悬空钩子，是一个"排好队等着"的接口。
 
         # 三个返回值的形状刻意保持一致（失败时也填 items/count），
         # 这样模型不必区分"键不存在"和"值为空"两种情况，提示词才好写。
