@@ -34,6 +34,7 @@ from agent.llm.base import (
     LLMTransientError,
     ToolCall,
 )
+from agent.memory.db import new_run_id
 from agent.runtime.budget import Budget
 from agent.runtime.loop import run_agent
 from agent.runtime.retry import RetryPolicy, policy_for, retry_call
@@ -125,9 +126,13 @@ class RoundScript:
 def run_with(llm: RoundScript, budget: Budget, *, clock: FakeClock | None = None):
     """跑一次 run_agent，必要时用假时钟顶掉 time.monotonic。"""
     if clock is None:
-        return run_agent("测试任务", llm, tool_names=["fetch_job_list"], budget=budget)
+        return run_agent(
+            "测试任务", llm, run_id=new_run_id(), tool_names=["fetch_job_list"], budget=budget
+        )
     with patch("time.monotonic", new=clock):
-        return run_agent("测试任务", llm, tool_names=["fetch_job_list"], budget=budget)
+        return run_agent(
+            "测试任务", llm, run_id=new_run_id(), tool_names=["fetch_job_list"], budget=budget
+        )
 
 
 print("═══ 预算闸门（budget.py + loop.py 的接线）")

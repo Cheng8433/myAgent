@@ -35,10 +35,18 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
 
-from agent.tools.sources.base import Job
+from agent.tools.sources.base import Job, JobPage
+
+if TYPE_CHECKING:
+    # ★ 只给类型检查器看的 import：运行时【不】依赖 runtime。
+    #   状态层不该反过来依赖编排层 —— 那样 memory ↔ runtime 就成环了。
+    #   这里用得到 RunResult 的只是函数签名，`from __future__ import annotations`
+    #   会把注解变成字符串，运行时根本不会去求值它。
+    from agent.runtime.loop import RunResult
 
 VAR_DIR_ENV = "VAR_DIR"
 DEFAULT_VAR_DIR = "var"
@@ -157,3 +165,102 @@ def upsert_jobs(
 
     inserted = after - before
     return {"inserted": inserted, "updated": len(jobs) - inserted}
+
+
+def store_page(
+    conn: sqlite3.Connection,
+    page: JobPage,
+    *,
+    run_id: str,
+    root: str | Path | None = None,
+) -> dict[str, int]:
+    """把【一次抓取】消费掉：原文存档 + 岗位入库。返回 upsert_jobs 那笔账。
+
+    ★ 为什么这两件事必须收在一个函数里：
+      它们是"这次抓取留下了什么"的两半。拆开写不会报错 —— 只会让库和原文对不上
+      （库里有这条岗位，翻原文却找不到它是从哪儿解析出来的），而且没有任何提示。
+      收在一处，就没有"忘了一半"这个可能。
+      （这正是 PLAN.md §M4 主流程里 `ctx.call("upsert_jobs", items)` 那一步：
+        由【编排层】调用，跑在主线程上 —— 所以 run_id 就在手边。
+        工具层不碰这个：模型可以决定"去抓第 3 页"，但"这次抓取算哪次 run 的、
+        要不要留档"不是它该管的事。工具是模型的手，编排是系统的手。）
+
+    ★ 顺序（先存档、后入库）是被依赖关系定死的，不是风格：
+      raw_path 要作为参数传给 upsert_jobs。反过来写就得先入库、再回填 raw_path ——
+      中间那段时间库里挂着一个指不到东西的路径。
+
+    ★ root 是给测试用的（临时目录），生产路径走 VAR_DIR，见 archive_raw。
+    """
+    raw_path = archive_raw(page.raw, root=root)
+    return upsert_jobs(conn, page.jobs, raw_path=raw_path, run_id=run_id)
+
+
+def record_run(conn: sqlite3.Connection, result: RunResult, *, started_at: str) -> None:
+    """把一次 run 的结局写进 runs（一行）+ steps（一条 StepRecord 一行）。
+
+    ★ 幂等靠"整段替换"：先按 run_id 删掉旧的 steps，再整批写回。
+      为什么不像 jobs 那样 ON CONFLICT DO UPDATE 逐行处理 ——
+      因为语义不同：jobs 是"这条岗位现在长什么样"（逐条刷新），
+      而 steps 是"这次 run 一共发生了这些事"（一个整体）。整体就该整体替换，
+      逐行 upsert 反而会在"这次比上次少了 3 步"时留下 3 条孤儿。
+
+    ★ steps 的 seq 用【枚举下标】，不用 StepRecord.step：
+      一轮里模型可能点 3 个工具 —— 那 3 条记录共用一个 step 值。
+      拿 step 当主键就是 (run_id, 3) 撞 (run_id, 3)，当场 IntegrityError。
+      （这正是 steps 主键从 PLAN 初稿改掉的那件事，见 db.py 的 SCHEMA 注释。）
+
+    ★ runs.error 这一格现在写 NULL：RunResult 里还没有错误原文，
+      它属于 M6 的 trace。留空是诚实的（"还没有"），填 "" 是撒谎（"什么都没有"）。
+    """
+    finished_at = datetime.now(UTC).isoformat()
+    conn.execute(
+        """
+        INSERT INTO runs (
+            run_id, started_at, finished_at, status, steps,
+            prompt_tokens, completion_tokens, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (run_id) DO UPDATE SET
+            finished_at       = excluded.finished_at,
+            status            = excluded.status,
+            steps             = excluded.steps,
+            prompt_tokens     = excluded.prompt_tokens,
+            completion_tokens = excluded.completion_tokens,
+            error             = excluded.error
+        """,
+        (
+            result.run_id,
+            started_at,
+            finished_at,
+            result.status,
+            len(result.steps),
+            result.prompt_tokens,
+            result.completion_tokens,
+            None,
+        ),
+    )
+    # ★ 这里【不】把 started_at 放进 DO UPDATE 的 SET：
+    #   和 jobs.first_seen_run 是同一条纪律 —— "什么时候开的跑"是历史事实，
+    #   第一次记下就不再改。重跑同一个 run_id 只该刷新结局，不该篡改起点。
+    conn.execute("DELETE FROM steps WHERE run_id = ?", (result.run_id,))
+    conn.executemany(
+        """
+        INSERT INTO steps (
+            run_id, seq, step, kind, detail, ok,
+            prompt_tokens, completion_tokens
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                result.run_id,
+                seq,
+                record.step,
+                record.kind,
+                record.detail,
+                record.ok,  # bool / None，sqlite3 会把 bool 存成 1/0
+                record.prompt_tokens,
+                record.completion_tokens,
+            )
+            for seq, record in enumerate(result.steps)
+        ],
+    )
+    conn.commit()

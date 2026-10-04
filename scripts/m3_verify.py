@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 import agent.tools.jobs  # noqa: F401  ← 触发真实工具注册
 from agent.llm.base import LLMResponse, ToolCall
+from agent.memory.db import new_run_id
 from agent.runtime.budget import Budget
 from agent.runtime.loop import _assistant_message, run_agent
 from agent.tools.registry import TOOLS, tool
@@ -162,7 +163,9 @@ def check_happy_path() -> None:
     register_fake("fake_ok", {"ok": True, "items": ["a", "b"], "count": 2})
     llm = ScriptedLLM([wants(("fake_ok", "{}")), says("做完了")])
 
-    result = run_agent("随便干点什么", llm, tool_names=["fake_ok"], budget=budget_of(4))
+    result = run_agent(
+        "随便干点什么", llm, run_id=new_run_id(), tool_names=["fake_ok"], budget=budget_of(4)
+    )
 
     assert result.status == "success", f"应正常结束，实际 {result.status}"
     assert result.answer == "做完了"
@@ -219,7 +222,9 @@ def check_unknown_tool() -> None:
     register_fake("fake_ok", {"ok": True})
     llm = ScriptedLLM([wants(("查天气的tool", "{}")), says("好的")])
 
-    result = run_agent("随便", llm, tool_names=["fake_ok"], budget=budget_of(4))
+    result = run_agent(
+        "随便", llm, run_id=new_run_id(), tool_names=["fake_ok"], budget=budget_of(4)
+    )
 
     assert result.status == "success", "幻觉工具名不该让整个 run 崩掉"
     fed = last_tool_message(llm)
@@ -234,7 +239,9 @@ def check_invalid_args() -> None:
     register_fake("fake_page", {"ok": True}, args_model=_PageArgs)
     llm = ScriptedLLM([wants(("fake_page", "{这不是JSON")), says("好的")])
 
-    result = run_agent("随便", llm, tool_names=["fake_page"], budget=budget_of(4))
+    result = run_agent(
+        "随便", llm, run_id=new_run_id(), tool_names=["fake_page"], budget=budget_of(4)
+    )
 
     assert result.status == "success", "参数不合法不该让整个 run 崩掉"
     fed = last_tool_message(llm)
@@ -249,7 +256,9 @@ def check_tool_crash() -> None:
     register_fake("fake_boom", {"ok": True}, raises=RuntimeError("数据库连接断了"))
     llm = ScriptedLLM([wants(("fake_boom", "{}")), says("好的")])
 
-    result = run_agent("随便", llm, tool_names=["fake_boom"], budget=budget_of(4))
+    result = run_agent(
+        "随便", llm, run_id=new_run_id(), tool_names=["fake_boom"], budget=budget_of(4)
+    )
 
     assert result.status == "success", (
         f"单个工具崩溃不该让整个 run 死掉（实际 {result.status}）—— 整轮失败就什么都查不出来了"
@@ -268,7 +277,14 @@ def check_loop_detection() -> None:
     # 剧本给足 10 轮；如果循环没打断，它会一直问到剧本用完
     llm = ScriptedLLM([wants(("fake_fail", "{}")) for _ in range(10)])
 
-    result = run_agent("随便", llm, tool_names=["fake_fail"], budget=budget_of(15), repeat_limit=2)
+    result = run_agent(
+        "随便",
+        llm,
+        run_id=new_run_id(),
+        tool_names=["fake_fail"],
+        budget=budget_of(15),
+        repeat_limit=2,
+    )
 
     assert result.status == "loop_detected", (
         f"应触发死循环检测，实际 {result.status} —— 循环在拿钱空转"
@@ -285,7 +301,14 @@ def check_repeat_limit_is_configurable() -> None:
     register_fake("fake_fail", {"ok": False, "error": "boom", "hint": "没救了"})
     llm = ScriptedLLM([wants(("fake_fail", "{}")) for _ in range(10)])
 
-    result = run_agent("随便", llm, tool_names=["fake_fail"], budget=budget_of(15), repeat_limit=3)
+    result = run_agent(
+        "随便",
+        llm,
+        run_id=new_run_id(),
+        tool_names=["fake_fail"],
+        budget=budget_of(15),
+        repeat_limit=3,
+    )
 
     assert result.status == "loop_detected", f"应触发死循环检测，实际 {result.status}"
     # ★ 这里卡 3 不卡 2：写死 2 的实现在上一项照样过，只有参数一变才露馅。
@@ -302,7 +325,14 @@ def check_max_steps() -> None:
     # 每轮参数都不同 —— 这是【合法】的连续调用（比如翻页），不该被当成打转
     llm = ScriptedLLM([wants(("fake_page", json.dumps({"page": i}))) for i in range(1, 11)])
 
-    result = run_agent("随便", llm, tool_names=["fake_page"], budget=budget_of(3), repeat_limit=2)
+    result = run_agent(
+        "随便",
+        llm,
+        run_id=new_run_id(),
+        tool_names=["fake_page"],
+        budget=budget_of(3),
+        repeat_limit=2,
+    )
 
     assert result.status == "max_steps_exceeded", (
         f"应撞上步数上限，实际 {result.status} —— 是不是把「连续相同」写成了「累计」？"
@@ -331,6 +361,7 @@ def check_real_tool() -> bool:
     result = run_agent(
         "拉取招聘列表第 1 页，只列 3 个公司名，不要展开。",
         llm,
+        run_id=new_run_id(),
         tool_names=["fetch_job_list"],
         budget=budget_of(6),
     )

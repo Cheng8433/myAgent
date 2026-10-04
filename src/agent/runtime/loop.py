@@ -85,6 +85,17 @@ class StepRecord:
 class RunResult:
     """一次 run 的结局。status 是一个【封闭词汇表】里的代号（见下）。"""
 
+    run_id: str
+    # ↑ 一次 run 的【身份】，由调用方在开跑前生成（memory/db.py 的 new_run_id）。
+    #   ★ 为什么放在这里、而不是让落库函数另外收一个参数：
+    #     它是 runs 表的主键、steps 的外键、"这次 run 抓到了哪些新岗位"的依据 ——
+    #     结局和身份分开走，就等着哪天有人配上错的那一对。
+    #   ★ 为什么 run_agent 【自己不生成】：生成它要用 memory/db.py，
+    #     而那样 runtime 就 import 了 memory；偏偏 memory/store.py 为了
+    #     record_run 又要 import runtime.loop（拿 RunResult 这个类型）——
+    #     一个环。所以身份由调用方给：编排层本来就知道"这是第几次跑"。
+    #     这和 M1「Provider 不许自己决定超时」是同一条纪律：别替上层做决定。
+
     status: str
     # ↑ 封闭集合，不是自由字符串 —— 多一个拼写就多一条永远匹配不上的分支，
     #   而且不会报错，只会让下游统计悄悄少一块。词汇表：
@@ -145,6 +156,7 @@ def run_agent(
     task: str,
     llm: LLMProvider,
     *,
+    run_id: str,
     tool_names: list[str],
     budget: Budget,
     repeat_limit: int = 2,
@@ -153,6 +165,10 @@ def run_agent(
 
     tool_names 是显式的：这里就是 M8 工具白名单的插口，也是 M4 按流程
     分阶段放权的插口 —— 别偷懒写成"注册了就能调"。
+
+    run_id 也是显式的，且【没有默认值】：默认成空串的话，落库时才会发现
+    runs 表的主键是空的 —— 那已经不是"报错得晚"了，是"报错在另一个模块"。
+    改成必填，忘传当场 TypeError，错误位置就是出错的位置。
     """
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -182,6 +198,7 @@ def run_agent(
         )
         if gate is not None:
             return RunResult(
+                run_id=run_id,
                 status=f"{gate}_exceeded",  # 由闸门名机械推导，不查映射表
                 answer="",
                 steps=tuple(records),
@@ -211,6 +228,7 @@ def run_agent(
 
         if not resp.wants_tools:
             return RunResult(
+                run_id=run_id,
                 status="success",
                 answer=resp.content or "",
                 steps=tuple(records),
@@ -288,6 +306,7 @@ def run_agent(
         signatures.append(sig)
         if signatures[-repeat_limit:] == [sig] * repeat_limit:
             return RunResult(
+                run_id=run_id,
                 status="loop_detected",
                 answer="",
                 steps=tuple(records),
@@ -297,6 +316,7 @@ def run_agent(
 
     # 终止条件 C：步数用尽（for 循环自然走完）
     return RunResult(
+        run_id=run_id,
         status="max_steps_exceeded",
         answer="",
         steps=tuple(records),
