@@ -23,10 +23,21 @@
 
 - [x] 计划书 `docs/PLAN.md`
 - [x] 仓库地基：目录骨架、`.gitignore`、`.env.example`、`pyproject.toml`
-- [ ] M0 浏览器抓包补全站点档案
-- [ ] M1 LLM 裸调用
-- [ ] M2 工具层（先 remoteok，后 ncss）
-- [ ] M3~M9
+- [ ] M0 浏览器抓包补全站点档案（ncss 登录流程还没抓 → `docs/SITE.md` 尚不存在）
+- [x] M1 LLM 裸调用 —— `scripts/m1_verify.py`
+- [x] M2a 工具层 · remoteok 替身 —— `scripts/m2_verify.py`
+- [ ] M2b 工具层 · ncss 真源（依赖 M0 的抓包结果 + Playwright 半自动登录）
+- [x] M3 ReAct 主循环 —— `scripts/m3_verify.py`（第 8 项走真模型 + 真工具）
+- [x] M4a 编排加固：重试 / 超时 / 预算闸门 —— `scripts/m4_verify.py`
+- [x] M4b 确定性主流程：抓取 → 两阶段入库 → 摘要 → 渲染落盘 —— `scripts/m4b_verify.py`
+- [x] M5 状态管理：SQLite 建库 + 幂等写入 + 内容寻址存档 —— `scripts/m5_verify.py`
+- [ ] M6 可观测 · M7 评估 · M8 安全与推送 · M9 部署
+
+> **M4b 留下的两件事**：① 真链路只跑过一次手工验证，还没被任何脚本盯住 ——
+> `m4b_verify.py` 全程离线（假数据源 + 假 LLM），真实网络/模型的形状由
+> `python -m app.main report` 手工确认。② 摘要那一趟如果 LLM 直接抛错，
+> 会走 `_summarize` 里那条 `except LLMError` 降级（日报照出，只有摘要是占位符）；
+> 这次调用的 token 用量无从得知，只能记 0，真正的账留给 M6 的 trace。
 
 ## 快速开始
 
@@ -40,14 +51,16 @@ source .venv/Scripts/activate      # Windows Git Bash
 pip install -e ".[dev]"
 
 # 3. 配置（.env 不会被提交，可以放心填）
+#    ⚠️ 这一步是【必需】的：预算与超时都是必填配置（AGENT_* / LLM_TIMEOUT_SECONDS），
+#       代码里没有默认值 —— 没有 .env，程序在启动时当场报错，而不是悄悄用别的数。
 cp .env.example .env
 #    然后编辑 .env，至少填上 LLM_API_KEY
 
-# 4. 半自动登录（M2 完成后可用；会弹出真实浏览器让你手动过验证码）
+# 4. 半自动登录（M2b 完成后可用；会弹出真实浏览器让你手动过验证码）
 python -m app.main login
 
-# 5. 跑一次日报
-python -m app.main run
+# 5. 跑一次日报（在仓库根目录执行）
+python -m app.main report
 ```
 
 ## ⚠️ Windows 中文编码（务必先看，否则会白踩坑）

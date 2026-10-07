@@ -71,12 +71,27 @@ SYSTEM_PROMPT = """你是一个招聘信息处理助手。
 
 @dataclass(frozen=True)
 class StepRecord:
-    """一步的留痕。M6 的 trace 直接由它序列化而来 —— 先让它可复现，再让它聪明。"""
+    """一步的留痕。M6 的 trace 直接由它序列化而来 —— 先让它可复现，再让它聪明。
+
+    kind 的词表（M4b 扩了两个值，因为留痕现在有两个来源）：
+      · "llm"      —— 一次 llm.chat()，detail 是 finish_reason
+      · "tool"     —— 一次工具调用，detail 是工具名，ok 是它报告的成功与否
+      · "workflow" —— 编排层自己的确定性步骤（抓页 / 入库 / 落盘），detail 是阶段名
+      · "subrun"   —— 一次 ReAct 子 run 的【结局】，detail 是那个子 run 的 status
+                      （子 run 的 status 词表和 runs 表的不一样，别混；
+                       见 memory/store.py 的 record_run）
+    ⚠️ kind 这列在库里是 TEXT，没有 CHECK 约束 —— 所以扩词表这件事
+       Python 侧不会报错，只有读表的人会被误导。加值请在这里登记。
+
+    step 的语义是"【子 run 内】的第几轮"。编排层的步骤不属于任何一轮，
+    约定用 step=0（"不是某一轮"）。⏳ 已知损失：两次子 run 的 step 编号
+    拼在一起会重来 —— 真正能分辨子 run 身份的是 M6 的 per-run JSONL。
+    """
 
     step: int
-    kind: str  # "llm" | "tool"
-    detail: str = ""  # llm: finish_reason；tool: 工具名
-    ok: bool | None = None  # 只有 tool 步有
+    kind: str  # "llm" | "tool" | "workflow" | "subrun"
+    detail: str = ""  # llm: finish_reason；tool: 工具名；workflow: 阶段名；subrun: 子 run status
+    ok: bool | None = None  # tool 步是工具报告的成功与否；其余多为 None
     prompt_tokens: int = 0
     completion_tokens: int = 0
 
@@ -87,12 +102,17 @@ class RunResult:
 
     run_id: str
     # ↑ 一次 run 的【身份】，由调用方在开跑前生成（memory/db.py 的 new_run_id）。
-    #   ★ 为什么放在这里、而不是让落库函数另外收一个参数：
-    #     它是 runs 表的主键、steps 的外键、"这次 run 抓到了哪些新岗位"的依据 ——
-    #     结局和身份分开走，就等着哪天有人配上错的那一对。
+    #   ★ M4b 之后它的去处变了 —— 这段以前写的不是这样，别照旧印象读：
+    #     runs 表【只由工作流】写，主键是【工作流】的 run_id（见 memory/store.py
+    #     与 workflows/daily_report.py）。子 run 不写 runs 表；它的 steps 被编排层
+    #     拼进【父 run】的 run_id 下 —— 所以从前那句"它是 runs 表的主键、
+    #     steps 的外键"已经【不成立】了，改掉了。
+    #   ★ 它现在【没有读者】：真正会读它的是 M6 的 per-run trace
+    #     （var/traces/run-<run_id>.jsonl，那才是子 run 身份该落的地方）。
+    #     这是一个「排好队等着」的接口，不是漏了 —— 同 jobs.py 的 JobPage.raw。
     #   ★ 为什么 run_agent 【自己不生成】：生成它要用 memory/db.py，
     #     而那样 runtime 就 import 了 memory；偏偏 memory/store.py 为了
-    #     record_run 又要 import runtime.loop（拿 RunResult 这个类型）——
+    #     record_run 又要 import runtime.loop（拿 StepRecord 这个类型）——
     #     一个环。所以身份由调用方给：编排层本来就知道"这是第几次跑"。
     #     这和 M1「Provider 不许自己决定超时」是同一条纪律：别替上层做决定。
 

@@ -18,6 +18,7 @@ from typing import Any
 
 from openai import APIConnectionError, APITimeoutError, OpenAI, OpenAIError
 
+from agent.config import ConfigError, required_float, required_str
 from agent.llm.base import (
     LLMError,
     LLMPermanentError,
@@ -90,19 +91,29 @@ def _normalize(exc: Exception) -> LLMError:
 
 
 class OpenAICompatProvider:
-    """把 OpenAI 兼容接口的响应，翻译成本项目自己的 LLMResponse。"""
+    """把 OpenAI 兼容接口的响应，翻译成本项目自己的 LLMResponse。
+
+    ★ 四个 LLM_* 变量【都是必填】（2026-10-07 起）：KEY / MODEL / BASE_URL / TIMEOUT。
+      代码里不留默认值 —— 尤其 base_url 与 model 必须成对出现：
+      只改了 base_url 却忘了改 model，就会把 deepseek-chat 发给通义，
+      报一个看不懂的错。让它缺了当场报，比发出一个注定失败的请求好。
+      读法与报错见 agent.config（缺失 / 空串 / 解析失败分开报）。
+    """
 
     def __init__(self) -> None:
         api_key = os.environ.get("LLM_API_KEY", "")
         if not api_key:
-            raise RuntimeError("LLM_API_KEY 未设置。请 cp .env.example .env 并填好。")
+            # ★ 这一个不套 agent.config：.env.example 里 `LLM_API_KEY=` 【故意为空】
+            #   （模板占位，等着你填）。所以它的"空"是意料之中的，
+            #   消息该给出【下一步做什么】，而不是 config 那句"配错了"。
+            raise ConfigError("LLM_API_KEY 未设置或为空。请 cp .env.example .env 并填好。")
 
-        self._model = os.environ.get("LLM_MODEL", "deepseek-chat")
+        self._model = required_str("LLM_MODEL")
 
         self._client = OpenAI(
-            base_url=os.environ.get("LLM_BASE_URL", "https://api.deepseek.com/v1"),
+            base_url=required_str("LLM_BASE_URL"),
             api_key=api_key,
-            timeout=float(os.environ.get("LLM_TIMEOUT_SECONDS", "60")),
+            timeout=required_float("LLM_TIMEOUT_SECONDS"),
             # ★ 关掉 SDK 自带的自动重试。
             #   理由：重试属于编排层（M4 统一管退避、幂等、预算）。
             #   如果让 SDK 偷偷重试，M4 的重试策略会被叠加放大，

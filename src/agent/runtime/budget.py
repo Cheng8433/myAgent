@@ -34,10 +34,11 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+
+from agent.config import required_float, required_int
 
 GATE_MAX_STEPS = "max_steps"
 GATE_MAX_TOKENS = "max_tokens"
@@ -48,59 +49,44 @@ GATE_WALL_CLOCK = "wall_clock"
 
 @dataclass(frozen=True)
 class Budget:
-    """一次 run 的三道上限。它只描述【限制】，不记录【用量】—— 见模块注释。"""
+    """一次 run 的三道上限。它只描述【限制】，不记录【用量】—— 见模块注释。
 
-    max_steps: int = 20
-    max_tokens: int = 200_000
-    max_wall_seconds: float = 600.0
+    ★ 三个字段【都没有默认值】—— 刻意如此，不是漏写（2026-10-07 改）。
+      预算是【配置】，配置的唯一出处是 .env（见 from_env）。
+      从前这里各写了个数当兜底，于是同一个默认值有了两个住处：
+      改了类字段忘了改 .env.example，模板就会撒谎，而且不报错。
+      去掉兜底之后，"配置缺了"从"悄悄用另一个数"变成"当场报错"——
+      这正是要的：**少算的账本比没有账本更危险**。
+      代价一并认下：删了 .env 就跑不起来（它从"建议"升级成"必需"）。
+    """
+
+    max_steps: int
+    max_tokens: int
+    max_wall_seconds: float
 
     @classmethod
     def from_env(cls) -> Budget:
         """从 .env 读三道闸。变量名与 .env.example 一致。
 
-        三条纪律（都不是风格问题，各自对应一类静默 bug）：
-        · 缺省值取自上面的类字段（cls.max_steps …），不再抄一遍数字 ——
-          同一个默认值写两处的话，改了字段忘了字符串，就会出现
-          "有 .env 时一套上限、没 .env 时另一套"，而且【不报错】。
-        · 变量存在但为空（`AGENT_MAX_STEPS=`）时抛错，不静默退回默认值。
-          一个被拼错的预算悄悄变成默认值，就是"少算的账本"。
-        · 解析失败时把变量名写进消息：int() 自带的
-          "invalid literal for int() with base 10: 'abc'"【没说是哪个变量】，
-          配置错了却看不出是谁错了 —— M4a-1 那个"归因错位"的同一个病。
+        ★ 三个变量【都是必填】：缺失 → 抛错，绝不退回一个代码里的数字。
+          退回等于"配置缺了也不告诉你"，而那个数字会静静生效。
 
-        ⚠️ 兜底必须写 cls.max_steps，不能写裸 max_steps：类属性不在方法的
-           名字作用域里，而该行有赋值会让它被认成【局部变量】，变量缺失时
-           抛 UnboundLocalError —— 且在有 .env 时【不报错】（or 左边为真，
-           右边不求值），本机全绿、CI 上炸。实测确认。
+        ★ 解析失败时把【变量名】写进消息（见 agent.config.required_int）：
+          int() 自带的 "invalid literal for int() with base 10: 'abc'"
+          【没说是哪个变量】，配置错了却看不出是谁错了 —— M4a-1 那个
+          "归因错位"的同一个病。空串与缺失也分开报。
+
+        ★ load_dotenv() 只在这里调：.env 不是环境的一部分，
+          得有人把它灌进 os.environ。放在唯一的入口，
+          就不必要求"记得在 import 之前先 load"这种口头约定。
 
         断言在 scripts/m4_verify.py 第 ⑦ 节。
         """
         load_dotenv()
-        # ★ 兜底取 cls.max_steps，不能写裸 max_steps：
-        #   类属性【不在】方法的名字作用域里；而这一行又有赋值，
-        #   于是裸 max_steps 被认成【局部变量】—— 变量缺失时抛
-        #   UnboundLocalError，而不是去取类字段。实测确认过。
-        #   更阴的是它在有 .env 时【不报错】（or 左边为真，右边不求值），
-        #   本机全绿、CI/生产上炸。
-        #   用 `,` 传兜底而不是 `or`：变量存在但为空（AGENT_MAX_STEPS=）时
-        #   直接抛错，而不是静默退回默认值 —— 那正是 TODO A 警告的"少算的账本"。
-        try:
-            max_steps = int(os.getenv("AGENT_MAX_STEPS", cls.max_steps))
-        except ValueError as exc:
-            raise ValueError("AGENT_MAX_STEPS 必须是整数") from exc
-        try:
-            max_tokens = int(os.getenv("AGENT_MAX_TOKENS", cls.max_tokens))
-        except ValueError as exc:
-            raise ValueError("AGENT_MAX_TOKENS 必须是整数") from exc
-        try:
-            max_wall_seconds = float(os.getenv("AGENT_WALL_CLOCK_SECONDS", cls.max_wall_seconds))
-        except ValueError as exc:
-            raise ValueError("AGENT_WALL_CLOCK_SECONDS 必须是浮点数") from exc
-
         return Budget(
-            max_steps=max_steps,
-            max_tokens=max_tokens,
-            max_wall_seconds=max_wall_seconds,
+            max_steps=required_int("AGENT_MAX_STEPS"),
+            max_tokens=required_int("AGENT_MAX_TOKENS"),
+            max_wall_seconds=required_float("AGENT_WALL_CLOCK_SECONDS"),
         )
 
     def exceeded(self, *, steps: int, tokens: int, wall_seconds: float) -> str | None:

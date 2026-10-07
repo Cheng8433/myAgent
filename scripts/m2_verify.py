@@ -96,6 +96,31 @@ def check_pagination() -> None:
     print("  翻到第 50 页：ok=True, count=0 ✓（空页 ≠ 出错）")
 
 
+def check_policy_single_source() -> None:
+    """考点：重试策略从工具【自己的声明】推导，不手抄（M4b 欠账的兑现点）。
+
+    fetch_page 曾经写死 policy_for("read")，和装饰器上的 side_effect="read"
+    是同一个事实的两个出处 —— 改一处、忘一处，不报错。这条断言把"两处分家"
+    变成可执行的：翻转工具的声明，重试策略必须【跟着变】。
+    """
+    print("\n═══ 考点：重试策略的单一出处 ═══")
+    spec = TOOLS["fetch_job_list"]
+    original = spec.side_effect
+    try:
+        # ★ 翻到 external（attempts=1）而不是 write —— read 与 write 的策略
+        #   【当前完全相同】(attempts/base/cap 一模一样)，拿它们互翻等于没测。
+        #   挑一个【能分辨结果】的值，这条断言才有意义。
+        spec.side_effect = "external"
+        assert jobs_mod._fetch_policy().attempts == 1, (
+            "改了工具的声明，重试策略却没跟着变 —— 策略多半还是手抄的字符串字面量"
+        )
+        spec.side_effect = "read"
+        assert jobs_mod._fetch_policy().attempts == 3, "改回 read 后策略没回来"
+    finally:
+        spec.side_effect = original  # 注册表是全局单例，验完必须还原
+    print("  翻转 side_effect：external→1 次 / read→3 次，策略跟着声明走 ✓")
+
+
 class _Boom:
     """一个只会抛异常的数据源替身，用来验证路 B。"""
 
@@ -148,6 +173,7 @@ def main() -> None:
     check_schema()
     check_normal_path()
     check_pagination()
+    check_policy_single_source()
     check_failure_paths()
     print("\n✅ M2a 通过：工具层的两条路都走得通，且模型在两路上都读得到有用的信息。")
 

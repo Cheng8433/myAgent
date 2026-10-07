@@ -656,6 +656,43 @@ def run_daily_report(ctx) -> dict:
 
 > **对比一下**：如果这里用纯 ReAct，你要担心模型今天心情好不好、会不会跳过入库、会不会重复推送。用确定性骨架，这些都不存在。**这就是「会写 Agent」和「会写系统」的差别。**
 
+> **2026-10-04 实现时改了四处（M4b 对账 —— 这段骨架照抄会撞墙，原因都记在这）。**
+> 1. **`report.py` 住在 `workflows/`，不在 PLAN 布局里的 `tools/`**：
+>    上面骨架设想模型调 `write_report` 落盘。实际是**系统**渲染落盘 ——
+>    工具是模型的手，编排是系统的手；日报的形状不该由模型的"发挥"决定。
+>    所以它不是一个工具：没有 `@tool` 装饰器，也不在任何白名单里。
+> 2. **`runs.status` 用工作流词表，不用 ReAct 词表**：
+>    `RunResult.status`（success / loop_detected / max_steps_exceeded / …）是
+>    **子循环**的结局，而 runs 表记的是**一次日报**。一次日报里可能跑 0~1 次子 run，
+>    而且它有循环根本没有的结局 —— "列表为空"时循环压根没被调用过。
+>    实际：`runs.status ∈ {success, failed, no_items}`（将来加 login_expired），
+>    子 run 的结局以 `StepRecord(kind="subrun", detail=<子 run 的 status>)` 落进 steps。
+>    连带：`record_run` 改收**显式字段**，不再收一个 `RunResult`。
+> 3. **验收 E 的口径改了**：E 原文是「新增岗位数 = 报告岗位数」。它只在第一次跑时成立 ——
+>    报告列的是**本次抓到的**，而 `inserted` 只数**新增**行；昨天就存在、今天被刷新的
+>    岗位算 `updated` 不算 `inserted`，第二次跑必然不等。改成两条可断言的口径：
+>    ① 报告里每一条都能按 `(source, source_id)` 在库里查到；② `inserted + updated == 报告条数`。
+> 4. **`MAX_PAGES`(50) 是护栏，硬编码**（同 `HARD_STEP_CEILING`）：它兜的是"服务端永远
+>    返回非空"这种病，不是可调的策略 —— 策略可配、护栏不可配。
+>    另：M3 那条 note 里的 `ctx` 依然没建，这里用的是普通函数调用 + 显式参数，
+>    没有 `ctx.call` / `ctx.paginate` / `ctx.react_subtask` 这套壳。
+>    `ensure_session`（M2b）与 `send_feishu`（M8）在骨架里各留了一行注释标着插点。
+>
+> **2026-10-06 补第 5 条（验收台逼出来的）。**
+> 5. **摘要那一趟要兜住 `LLMError`** —— 骨架里只靠 `result.status != "success"`
+>    判"没答完"，那只兜得住**循环自己走完**的两种结局（撞预算 / 死循环）。
+>    `llm.chat()` 直接抛错时（超时、429、401），异常会一路穿出 `run_agent` →
+>    `_summarize` → `run_daily_report`；于是这次 run **既没有报告、也没有 runs 记录**，
+>    而**抓取阶段的数据已经入库了** —— 正是两阶段设计想躲开的"库动了、账上没有"。
+>    现在 `_summarize` 用 `except LLMError` 降级（日报照出，只有摘要是占位符），
+>    并记一条 `StepRecord(kind="subrun", detail="llm_error:<类型名>")`。
+>    ★ 兜的是**有类型的** `LLMError`（M1 的封闭词汇表），不是 `except Exception`：
+>    后者会把我们自己的 bug 也写成"模型挂了"，归因错位（同 M4a-1）。
+>    ★ 认下的账：这次调用的 token 用量无从得知（异常没带回来），只能记 0 ——
+>    记 0 是"不知道"，不是"没花钱"，真正的账留给 M6 的 trace。
+>    （发现方式：`scripts/m4b_verify.py` 第 ⑨ 节。这就是验收台存在的意义 ——
+>    这条路径平时一次都不会走到。）
+
 ### 自测题
 > 「发飞书通知」为什么不能简单重试 3 次？你的方案是什么？
 
@@ -718,6 +755,24 @@ CREATE TABLE IF NOT EXISTS pushes (      -- ★ 幂等凭证
 - 每次 HTTP 响应原始体存 `var/raw/<run_id>/<sha1>.json`，DB 只存路径与摘要
 - **理由**：LLM 上下文放不下整页 HTML，但排查问题时你需要完整原文
 - 数据库里存 `raw_path`，模型需要细节时可以用 `read_raw(path)` 工具按需读取片段
+
+> **2026-10-04 补记（M5 实现与上面 SQL 的分歧 —— 代码才是准的，见 `memory/db.py`）。**
+> 这几条都是**实测撞出来的**，不是风格偏好：
+> 1. `steps` 主键 `(run_id, step, tool, args)` → **`(run_id, seq)`**：SQLite 的
+>    PRIMARY KEY **不拒 NULL**，而 llm 步的 `tool/args` 天然是 NULL —— 实测同一行
+>    插两次都进得去，去重当场失效。`seq` 是这条记录在子 run 内的序号。
+> 2. `jobs` 主键 `job_id` → **`(source, source_id)`**：两个源各自从 1 开始编号，
+>    只按站点 id 会让不同源的岗位撞成同一行、互相覆盖。
+> 3. `pushes` **刻意没建**：它唯一的写入者在 M8。先建就是又一张"声明了但没人消费"的空表。
+> 4. raw 存档路径 `var/raw/<run_id>/<sha1>.json` → **`var/raw/<sha1>.json`**：
+>    路径里已经有 sha1 了再加一层 run_id，等于同一份字节每天多存一遍 ——
+>    实测 remoteok 第 1 页与第 2 页的 raw 是**同一份 564 KB**（远端一次给全量、本地切片）。
+>    而"这份原文是哪次 run 抓的"，库里答得更准（`jobs.first_seen_run` + `runs.started_at`）。
+>    代价：不能再用 `rm -rf var/raw/<run_id>` 清某次 run 的存档，得删"没被任何
+>    `jobs.raw_path` 引用的文件"。
+> 5. `runs.status` 的 `running|success|failed|aborted` → 见上面 M4b 那条（工作流词表）。
+> 6. `steps` 少了 PLAN 里的 `latency_ms` / `error` 两列 —— 它们属于 M6（trace 要的时延、
+>    `runs.error` 要的错误原文）。**声明了但没人写**的列，现在不加。
 
 ### 自测题
 > 进程在「已抓取、未推送」时被 kill，重启后如何保证不重复推送、也不漏推？

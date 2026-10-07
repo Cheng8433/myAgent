@@ -44,9 +44,11 @@ from agent.tools.sources.base import Job, JobPage
 if TYPE_CHECKING:
     # ★ 只给类型检查器看的 import：运行时【不】依赖 runtime。
     #   状态层不该反过来依赖编排层 —— 那样 memory ↔ runtime 就成环了。
-    #   这里用得到 RunResult 的只是函数签名，`from __future__ import annotations`
+    #   这里用得到 StepRecord 的只是函数签名，`from __future__ import annotations`
     #   会把注解变成字符串，运行时根本不会去求值它。
-    from agent.runtime.loop import RunResult
+    #   （M4b 之前这里是 RunResult。改成 StepRecord 的原因见 record_run 的
+    #     docstring：runs 表属于【工作流】，不该被 ReAct 子循环的词表绑住。）
+    from agent.runtime.loop import StepRecord
 
 VAR_DIR_ENV = "VAR_DIR"
 DEFAULT_VAR_DIR = "var"
@@ -195,8 +197,28 @@ def store_page(
     return upsert_jobs(conn, page.jobs, raw_path=raw_path, run_id=run_id)
 
 
-def record_run(conn: sqlite3.Connection, result: RunResult, *, started_at: str) -> None:
+def record_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    status: str,
+    steps: Sequence[StepRecord],
+    prompt_tokens: int,
+    completion_tokens: int,
+    started_at: str,
+) -> None:
     """把一次 run 的结局写进 runs（一行）+ steps（一条 StepRecord 一行）。
+
+    ★ 为什么收【显式字段】而不是一个 RunResult（M4b 改的，原来是后者）：
+      `RunResult.status` 是 **ReAct 子循环**的封闭词表
+      （success / loop_detected / max_steps_exceeded / …）；
+      而 runs 表记的是**工作流**那一次 run
+      （PLAN 的词表：success / failed / no_items，将来还有 login_expired）。
+      两者不是一回事 —— 一次日报 run 里可能跑 0~2 次 ReAct 子 run，
+      而且它有循环根本没有的结局（"列表为空"循环压根没被调用过）。
+      硬把子循环的 RunResult 塞进 runs，等于在最需要准确的表上让类型撒谎。
+      所以：**runs 表只由工作流写**，子 run 的结局不丢，它以一条
+      `StepRecord(kind="subrun", detail=<子 run 的 status>)` 落进 steps。
 
     ★ 幂等靠"整段替换"：先按 run_id 删掉旧的 steps，再整批写回。
       为什么不像 jobs 那样 ON CONFLICT DO UPDATE 逐行处理 ——
@@ -204,13 +226,10 @@ def record_run(conn: sqlite3.Connection, result: RunResult, *, started_at: str) 
       而 steps 是"这次 run 一共发生了这些事"（一个整体）。整体就该整体替换，
       逐行 upsert 反而会在"这次比上次少了 3 步"时留下 3 条孤儿。
 
-    ★ steps 的 seq 用【枚举下标】，不用 StepRecord.step：
-      一轮里模型可能点 3 个工具 —— 那 3 条记录共用一个 step 值。
-      拿 step 当主键就是 (run_id, 3) 撞 (run_id, 3)，当场 IntegrityError。
-      （这正是 steps 主键从 PLAN 初稿改掉的那件事，见 db.py 的 SCHEMA 注释。）
+    ★ runs.error 这一格现在写 NULL：错误原文属于 M6 的 trace。
+      留空是诚实的（"还没有"），填 "" 是撒谎（"什么都没有"）。
 
-    ★ runs.error 这一格现在写 NULL：RunResult 里还没有错误原文，
-      它属于 M6 的 trace。留空是诚实的（"还没有"），填 "" 是撒谎（"什么都没有"）。
+    断言在 scripts/m5_verify.py 的第 ⑦ 节 —— 那里就是你的反馈回路。
     """
     finished_at = datetime.now(UTC).isoformat()
     conn.execute(
@@ -228,20 +247,36 @@ def record_run(conn: sqlite3.Connection, result: RunResult, *, started_at: str) 
             error             = excluded.error
         """,
         (
-            result.run_id,
+            run_id,
             started_at,
             finished_at,
-            result.status,
-            len(result.steps),
-            result.prompt_tokens,
-            result.completion_tokens,
+            status,
+            len(steps),
+            prompt_tokens,
+            completion_tokens,
             None,
         ),
     )
     # ★ 这里【不】把 started_at 放进 DO UPDATE 的 SET：
     #   和 jobs.first_seen_run 是同一条纪律 —— "什么时候开的跑"是历史事实，
     #   第一次记下就不再改。重跑同一个 run_id 只该刷新结局，不该篡改起点。
-    conn.execute("DELETE FROM steps WHERE run_id = ?", (result.run_id,))
+
+    # ★ steps 用【整段替换】：先按 run_id 删掉旧的，再整批写回。
+    #   为什么不像上面 runs 那样只靠 ON CONFLICT —— 语义不同：
+    #   runs 是"一次 run 只有一行"，冲突就是同一行，DO UPDATE 天然正确；
+    #   而 steps 是"这次 run 一共发生了这些事"，条数会变。若只逐行 upsert，
+    #   这次比上次【少】几步时多出来的旧行没人删 —— 重跑一次，库里躺着两次
+    #   run 的混合体，而且它看上去还挺完整。
+    #
+    # ★ DELETE 与下面的 INSERT 必须落在【同一个事务】里（提交统在末尾做）：
+    #   分开提交的话，"删完、还没写"那个窗口里进程被 kill，steps 就空了，
+    #   而 runs.steps 那个计数还写着 3 —— 库里躺着一个自相矛盾的状态。
+    #
+    # ★ seq 取 enumerate 的【下标】，不是 record.step：
+    #   一轮里模型可能点 3 个工具，那 3 条留痕的 step 都是 1，
+    #   而 steps 的主键是 (run_id, seq) —— 拿 step 当 seq 会当场 IntegrityError。
+    #   step 回答"属于第几轮"，seq 回答"在这张表里排第几"，两个问题两把尺子。
+    conn.execute("DELETE FROM steps WHERE run_id = ?", (run_id,))
     conn.executemany(
         """
         INSERT INTO steps (
@@ -251,16 +286,17 @@ def record_run(conn: sqlite3.Connection, result: RunResult, *, started_at: str) 
         """,
         [
             (
-                result.run_id,
-                seq,
+                run_id,
+                seq,  # ← enumerate 的下标，从 0 开始；不是 record.step
                 record.step,
                 record.kind,
                 record.detail,
-                record.ok,  # bool / None，sqlite3 会把 bool 存成 1/0
-                record.prompt_tokens,
+                record.ok,  # bool | None 原样交出 → sqlite3 存成 1 / 0 / NULL
+                record.prompt_tokens,  # 单轮值，别传累计值
                 record.completion_tokens,
             )
-            for seq, record in enumerate(result.steps)
+            for seq, record in enumerate(steps)
         ],
     )
+
     conn.commit()

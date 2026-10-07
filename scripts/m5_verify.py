@@ -26,7 +26,7 @@ from pathlib import Path
 
 from agent.memory.db import connect, ensure_schema, new_run_id
 from agent.memory.store import archive_raw, record_run, store_page, upsert_jobs
-from agent.runtime.loop import RunResult, StepRecord
+from agent.runtime.loop import StepRecord
 from agent.tools.sources.base import Job, JobPage
 
 failures = 0
@@ -268,30 +268,38 @@ def main() -> None:
         )
 
         # ══════════════════════════════════════════════════════════
-        #  ⑦ record_run：RunResult 落进 runs / steps
+        #  ⑦ record_run：一次工作流的结局与留痕
         # ══════════════════════════════════════════════════════════
         print("\n═══ ⑦ record_run：结局与留痕 ═══")
-        # 假的 RunResult —— 只是把 dataclass 填满，不用真跑一遍循环。
-        fake = RunResult(
-            run_id=rid,
-            status="loop_detected",
-            answer="",
-            steps=(
-                StepRecord(
-                    step=1, kind="llm", detail="tool_calls", prompt_tokens=100, completion_tokens=10
-                ),
-                StepRecord(step=1, kind="tool", detail="fetch_job_list", ok=False),
-                StepRecord(
-                    step=2, kind="llm", detail="tool_calls", prompt_tokens=120, completion_tokens=12
-                ),
+        # ★ 这里【不再】造 RunResult：record_run 收显式字段 ——
+        #   runs 表属于【工作流】，和 ReAct 子循环的 RunResult 不是一回事：
+        #   子循环的词表里没有"列表为空"这种结局，而工作流有。
+        steps = (
+            StepRecord(
+                step=1, kind="llm", detail="tool_calls", prompt_tokens=100, completion_tokens=10
             ),
-            prompt_tokens=220,
-            completion_tokens=22,
+            StepRecord(step=1, kind="tool", detail="fetch_job_list", ok=False),
+            StepRecord(
+                step=2, kind="llm", detail="tool_calls", prompt_tokens=120, completion_tokens=12
+            ),
         )
         started = "2026-10-02T03:00:00+00:00"
-        record_run(conn, fake, started_at=started)
+
+        def write_run() -> None:
+            """同一次 run、同样的参数写一遍。调两次就是幂等测试。"""
+            record_run(
+                conn,
+                run_id=rid,
+                status="success",
+                steps=steps,
+                prompt_tokens=220,
+                completion_tokens=22,
+                started_at=started,
+            )
+
+        write_run()
         r = conn.execute("select * from runs where run_id = ?", (rid,)).fetchone()
-        check("runs.status", r["status"], "loop_detected")
+        check("runs.status", r["status"], "success", "工作流词表：success / failed / no_items")
         check("runs.steps = 记录条数", r["steps"], 3, "llm 与 tool 都算一步留痕")
         check("runs 的 token 是累计值", (r["prompt_tokens"], r["completion_tokens"]), (220, 22))
         check("runs.started_at 是历史事实", r["started_at"], started, "重跑不该篡改起点")
@@ -307,7 +315,7 @@ def main() -> None:
         )
 
         # 幂等：整段替换，不是追加
-        record_run(conn, fake, started_at=started)
+        write_run()
         check(
             "重跑一遍（应整段替换）",
             conn.execute("select count(*) from steps where run_id = ?", (rid,)).fetchone()[0],

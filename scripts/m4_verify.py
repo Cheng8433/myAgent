@@ -193,16 +193,17 @@ SEEN = {
     "wall_clock_exceeded",
 }
 observed = set()
+# ★ 三个字段现在【必填】（2026-10-07 起没有代码默认值），所以每处都写全。
 for b in (
-    Budget(max_steps=1),
-    Budget(max_steps=99, max_tokens=1),
+    Budget(max_steps=1, max_tokens=10**9, max_wall_seconds=10**9),
+    Budget(max_steps=99, max_tokens=1, max_wall_seconds=10**9),
     Budget(max_steps=99, max_tokens=10**9, max_wall_seconds=0.0),
 ):
     observed.add(run_with(RoundScript(), b).status)
 bogus = observed - SEEN
 check("多出来的 status", bogus or "（无）", "（无）", "既有 max_steps_exceeded，别造出第二个写法")
 
-print("\n⑦ from_env：读环境变量；兜底值与类字段【同一个出处】")
+print("\n⑦ from_env：三道闸【都是必填】，缺一个就抛错")
 # ★ 这一节补的是"声明了但没人消费"的另一面：from_env() 自从写出来就没有
 #   任何断言在盯它 —— 而没有断言 = 改坏了也不会有人知道。
 #   假时钟在这里帮不上忙，要假的是【环境】：用 patch 把 load_dotenv 顶掉，
@@ -210,14 +211,21 @@ print("\n⑦ from_env：读环境变量；兜底值与类字段【同一个出�
 #   （裸 max_steps 引出的 UnboundLocalError，有 .env 时不报错）。
 no_dotenv = patch("agent.runtime.budget.load_dotenv")
 
+# ★ 2026-10-07 起这条断言【反过来】了：从前断言的是"缺失 → 取类字段默认值"，
+#   而那正是被废掉的行为（同一个默认值两个住处 → 模板迟早撒谎）。
+#   现在的要求是"缺失 → 当场报错"。断言跟着实现走，不是反过来。
 with no_dotenv, patch.dict(os.environ, {}, clear=True):
-    b = Budget.from_env()
-    check(
-        "三个变量都缺失 → 取类字段默认值",
-        (b.max_steps, b.max_tokens, b.max_wall_seconds),
-        (Budget().max_steps, Budget().max_tokens, Budget().max_wall_seconds),
-        "这就是「同一个出处」的可执行定义",
-    )
+    try:
+        Budget.from_env()
+    except ValueError as exc:
+        check(
+            "三个变量都缺失 → 抛错（不再有代码兜底）",
+            "AGENT_MAX_STEPS" in str(exc),
+            True,
+            "静默用一个代码里的数，就是「少算的账本」—— 缺失必须响",
+        )
+    else:
+        check("三个变量都缺失 → 抛错（不再有代码兜底）", "没炸", "ValueError")
 
 with (
     no_dotenv,
