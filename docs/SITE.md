@@ -32,7 +32,7 @@
 
 ---
 
-## 2. ❓ 待抓包补齐的五格
+## 2. ✅ 已完成的五格（记录见 §3 / §4）
 
 | # | 要记的东西 | 怎么记 | 填在这里 |
 |---|---|---|---|
@@ -67,12 +67,22 @@
 |---|---|
 | POST 到 CAS 之后跳转链路（按顺序列 URL） | **①（实测）** `GET  https://www.ncss.cn/student/login.jsp` → 302 → `account.chsi.com.cn/passport/login?...`<br>**②（实测）** `POST https://account.chsi.com.cn/passport/login?service=.../connect/chsi&entrytype=stu` → **302**，`Location: https://www.ncss.cn/student/connect/chsi?ticket=ST-<REDACTED>-cas`<br>**③（待确认）** `GET .../student/connect/chsi?ticket=ST-...` → ncss **拿 ticket 去 CAS 后端校验**（server-to-server，浏览器里看不到这一跳）→ **Set-Cookie 下发自己的会话** → 302 到 `/student/index.html`<br>**④（待确认）** `GET /student/index.html` → 200 |
 | 回跳 `connect/chsi` 时换了什么 | ★ **"换了什么"= ① CAS 的一次性 ticket 被换成了 ② ncss 自己的一张长命会话 cookie。**<br>这就是 CAS 的 **Service Ticket 交换**：`ST-...-cas` 是 CAS 发给"服务方"（这里是 ncss）的**一次性凭证**，只能用一次、几十秒失效；ncss 拿着它向 CAS 的 `/serviceValidate` 校验一次（这步是服务器之间通信，浏览器抓不到），确认"这个人确实是刚通过认证的"，然后**签发给自己的 session cookie** —— 之后所有请求都只认这张 cookie，和 CAS 再没关系。<br>**怎么亲眼确认**：DevTools → Network → 勾上 **Preserve log**（跨跳转保命，不勾的话 302 会把你刚要看的那条刷没）→ 清空 → 重新登录 → 找到 `connect/chsi` 那条 → 看 **Response Headers**：`Location`（它往哪跳）与 `Set-Cookie`（它发了什么）。 |
-| **登录态 Cookie 名** | ▢ 待填。**三步拿到**：<br>1. **最省事**：跑 `python -m app.main login` —— 它跑完会把捕获到的 cookie 名**直接打出来**（见 §2 的偷懒提示）。<br>2. **要不安装 Playwright 的办法**：Chrome → `F12` → **Application** 面板（Firefox 叫 **Storage**）→ 左侧 Cookies → 点 `https://www.ncss.cn` → 看 **Name** 列。<br>3. **判定谁是会话**：对比登录**前**和**后**，取"新增的 / 值变了的 / 登录前是空的"那几条 —— 其中 `Domain=.ncss.cn`、`Path=/`、**HttpOnly 打勾**的那个几乎肯定是。 |
-| 该 Cookie 的 domain / path / 是否 HttpOnly | ▢ 待填。**就在上面那张表的同一行**：Application → Cookies → `https://www.ncss.cn` → 点某个 Name，右侧/右侧面板里就有 **Domain**、**Path**、**HttpOnly** 三列。<br>★ **`HttpOnly` 这一格是"最有信息量"的一格**：打了勾 = JS 读不到（`document.cookie` 里看不见它），说明服务端刻意防 XSS 窃取 —— 反过来也告诉我们"这是一种**只给 HTTP 请求头用**的会话 cookie"，正是我们 `httpx` 要带的那种。<br>★ 顺带记 `Domain`：如果是 `.ncss.cn`（前面带点）就是**父域 cookie**，子域也收得到 —— 这正是 `cookies_from_state(state, domains=("ncss.cn",))` 用**子串匹配**而不是全等主机名的原因（见 `tests/test_auth.py::test_parent_domain_token_matches_subdomains`）。 |
+| **登录态 Cookie 名** | ✅ **实测（2026-10-16）：`JSESSIONID`** —— Tomcat/Jetty 这类 **Java 容器的默认会话 cookie 名**（ncss 后台是 Java 栈，符合预期）。<br>★ **名字只是标签，不是判据**：CAS 链路上**两个后端各发一个同名 cookie** —— `account.chsi.com.cn`（CAS 服务器自己的会话，**不要**）与 `www.ncss.cn`（ticket 交换后签发的业务会话，**要的就是它**）。**同名、只靠 Domain 区分** —— 这恰是"域名是筛子、名称是答案"的活例。<br>★ **我们的代码不看名字**：`cookies_from_state(state, domains=("ncss.cn",))` 按**域名子串**筛，`.ncss.cn` 与 `www.ncss.cn` 都命中、`account.chsi.com.cn` 当场落选。所以名字将来变了也不影响运行 —— 它的用途是**填档案 + 做变更感知**，不是"让代码找到它"。<br>**复核方法**（留在这里，供哪天突然失效时重查）：① 最省事——跑 `python -m app.main login`，它把捕获到的 cookie 名**直接打出来**；② 不装 Playwright 的办法——Chrome `F12` → **Application** → Cookies → 点 `https://www.ncss.cn` → 看 **Name** 列。 |
+| 该 Cookie 的 domain / path / 是否 HttpOnly | ✅ **实测（2026-10-16）**：`Domain=www.ncss.cn`、`Path=/`、**`HttpOnly` ✓**、**`Secure` ✓**、`Size=42`、`Expires=会话`。<br>★★ **`Domain` 是唯一"决定成败"的一格，而实测值和当初的预测不一样** —— 档案原先猜的是 `.ncss.cn`（**前面带点 = 父域 cookie**，子域也收得到）；实测却是 `www.ncss.cn`（**无前导点 = host-only**，只发给这一个主机）。<br>★★★ **但对代码毫无影响**：正因为 `cookies_from_state` 筛的是**域名子串**（`"ncss.cn" in domain`）而不是全等主机名，`.ncss.cn` 与 `www.ncss.cn` **走的是同一条分支**。当初那个"安全的超集"决定（见 `main.py` 里 `NCSS_COOKIE_DOMAIN` 的 docstring）在这一格兑现了：**预测错了，代码依然是对的**。反过来说，若当初按"常见情况"写死全等 `.ncss.cn`，今天就会**静默筛空** → 请求带着空 cookie 出去 → 302 → 看起来像"刚存的登录态就过期了"，而病因指向完全错误的方向。<br>★ **`HttpOnly` ✓** = JS 读不到（`document.cookie` 里看不见它），说明服务端刻意防 XSS 窃取 —— 即"**只给 HTTP 请求头用**的会话凭据"，正是 `httpx` 要带的那种。**`Secure` ✓** = 只在 HTTPS 上发送，`ncss.py` 请求的正是 `https://`，满足。<br>★ **`Path=/`** 对我们无影响（我们发的是扁平 `Cookie:` 头，httpx 不做路径匹配），但它同时意味着**不会**出现"同名不同 path"的分裂 —— `auth.py` 里"同名后写覆盖先写"那条锐边因此不触发。 |
 
 > **怎么自己复核第 ③ 跳**：DevTools 的 Network 面板默认**只显示当前页面所在的导航**，
 > 302 会把上一条冲掉。所以抓登录链的**唯一正确姿势**是勾上 **Preserve log**，
 > 然后把筛选设成 `All`（不是 XHR），重新登录一次，整条 302 链就会连着头都留着。
+
+> ★ **顺手把一个概念立在档案里：cookie 有【两个方向】，别混。**
+> · **发下来**：响应头里的 `Set-Cookie`（服务端 → 浏览器）。第 ③ 跳就是这样把
+>   ncss 的会话 cookie 塞进浏览器的。
+> · **带上去**：请求头里的 `Cookie`（浏览器 → 服务端）。之后每一次访问职位接口，
+>   浏览器／`httpx` 都靠它自报家门。
+> · **`storage_state()` 拍的快照 = 浏览器那只 cookie 罐子（jar）**，即"收下来的全部"；
+>   我们只从罐子里挑**属于 ncss 域**的那些，再照着上面的方向**带上去**。
+> · 所以 **`value` 是会变的**（每次登录换一张新"票"），**值不进档案**；
+>   档案只记**名称 + 域名 + Path + 标志位** —— 这些才是稳定的部分。
 
 > ⚠️ 登录后前端可能**有二次请求换取 token**，别只抓第一个请求；有些站点用的是
 > `Authorization` 头而不是 Cookie。
@@ -166,7 +176,7 @@
 
 | 问题 | 记录 |
 |---|---|
-| 今天登的，明天还在吗？ | ⚠️ 这行现在是**猜的**，不是测的。★ **最省事的测法**：上一条要你记的那个会话 cookie，在 Application → Cookies 表里**同一行有 `Expires / Max-Age` 两列** —— 它直接回答"能活多久"（`Session` = 关浏览器就没）。<br>第二省事的测法：今天跑一次 `login`，**明天**直接 `python -m app.main report`，看退出码是不是 3。 |
+| 今天登的，明天还在吗？ | ⚠️ **仍未知 —— 而且 2026-10-16 拿到一条不利的线索。**<br>★ **实测**：该 cookie 的 `Expires = 会话（Session）`，即**没有 `Max-Age`/`Expires` 属性**，由浏览器**存在内存里、关浏览器即丢**。<br>★★ **但"关浏览器即丢"这一条对【我们】不成立**：我们不等浏览器，而是把值快照进 `var/auth/ncss_state.json`（`storage_state` 会把它记成 `expires: -1`），之后用 `httpx.get(cookies=...)` **手工重放** —— 重放时 httpx 也不看有效期。**浏览器侧的行为整个与我们无关。**<br>★★★ 真正决定"能用几天"的是**服务端**的 session 超时，而它**在浏览器里看不到**。⚠️ 这里有一条**必须当心的风险**：`JSESSIONID` 是 **Tomcat/Jetty 的默认会话名**，而它们的**默认 session 超时是"30 分钟不活动"** —— 若 ncss 没有调大，那么"人工登一次、之后几天自动跑"这条**前提就不成立**（变成每天都要人工续期）。<br>**唯一的硬判据**（在真跑一次之前，这条不许写成结论）：今天跑一次 `python -m app.main login`，**明天**直接 `python -m app.main report`，看退出码是不是 **3**。是 3 = 会话很短；不是 = 够用。 |
 | 失效时的信号是什么？ | ★ 这条**已经是实测的**了，不是待办：§1 那行"未登录一律 302 到登录页"就是它 —— 代码里 `LoginExpired` 的 docstring 和 `base.py:95` 都按它写好了。**只剩一个待确认**：失效时 302 的目标到底是不是 `/student/login.jsp`（还是先 302 到 CAS）。→ 抓一次失效请求的 `Location` 就能定。 |
 | 有没有"滑动续期"（每次请求都刷新有效期） | 未知。★ 判据：抓两次相隔一会儿的请求，看响应头里的 `Set-Cookie` 有没有**再发一次**（发了 = 会续期）。 |
 

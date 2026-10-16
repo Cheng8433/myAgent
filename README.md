@@ -23,7 +23,7 @@
 
 - [x] 计划书 `docs/PLAN.md`
 - [x] 仓库地基：目录骨架、`.gitignore`、`.env.example`、`pyproject.toml`
-- [ ] M0 浏览器抓包补全站点档案（主人填了 `docs/SITE.md` 大头：CAS 登录字段、职位接口路径与分页参数、响应结构都到手了；**还差三格**：`§3.2` 登录态 cookie 名 / `§4` offset 是页码还是行号 / `§5` 会话生命周期）
+- [ ] M0 浏览器抓包补全站点档案（主人填了 `docs/SITE.md` 大头：CAS 登录字段、职位接口路径与分页参数、响应结构、**登录态 cookie 名**都到手了 —— `JSESSIONID`，`host-only` 落在 `www.ncss.cn`，`Path=/`，`HttpOnly`+`Secure`；**还差两格**：`§4` `offset` 是页码还是行号 / `§5` **服务端**会话寿命 —— 后者有一条不利线索：该 cookie 是 `Expires=会话`，而 `JSESSIONID` 是 Tomcat 默认名、默认超时仅"30 分钟不活动"，需真跑一次才能定）
 - [x] M1 LLM 裸调用 —— `scripts/m1_verify.py`
 - [x] M2a 工具层 · remoteok 替身 —— `scripts/m2_verify.py`
 - [ ] M2b 工具层 · ncss 真源 —— **Phase A + Phase B 代码均已落地**：`python -m app.main login` 半自动登录 + 登录态落盘（`agent/tools/auth.py`）+ 登录过期接线（`status=login_expired` → 退出码 3）；`sources/ncss.py` 照 `docs/SITE.md` 实现了解析与分页，`tests/test_ncss.py` 29 条离线断言（respx 假响应，**一次真实请求都不发**）。⚠️ **尚未端到端真跑**：翻页节流（≥3s）属 M8，未实现前真跑会背靠背拉页，违反本项目合规规则（详见 PLAN §M2 Phase B 对账第 6 条）
