@@ -142,7 +142,7 @@ myAgent/
 | 登录方式 | **学信网 CAS 统一身份认证**（账号密码，非短信） |
 | 是否有验证码 | **有，图形验证码**（登录页含 `captcha` / 验证码字样）。处理方案见 M2 |
 | 登录表单字段 | `username` / `password` / `lt` / `execution` / `_eventId`（**CAS 标准表单**，⚠️ 具体字段需抓包确认） |
-| 登录态形式 | ✅ **实测（2026-10-16）**：`JSESSIONID`（Tomcat/Jetty 的**默认会话名**），**host-only** 落在 `www.ncss.cn`、`Path=/`、`HttpOnly` ✓、`Secure` ✓；`Expires=会话`，服务端寿命**未测**（见 SITE.md §5 的风险条）。⚠️ CAS 服务器 `account.chsi.com.cn` **另有一个同名 cookie**，靠域名区分 —— 我们的子串筛选（`domains=("ncss.cn",)`）按设计**只收前者**。详见 `docs/SITE.md` §3.2 |
+| 登录态形式 | ✅ **实测（2026-10-16）**：业务会话是 **`SESSION`**（`www.ncss.cn`、`Path=/student/`、`HttpOnly` ✓ `Secure` ✓、`expires=-1` 会话级）；`www.ncss.cn` 域共 **13 条** cookie（另含阿里云 WAF 与三套埋点）。★ `JSESSIONID` **确实存在，但属于 CAS 服务器 `account.chsi.com.cn`**（它也跑 Tomcat），按域名被我们**排除** —— 详见 `docs/SITE.md` §3.2 那张 21 条的实测表。⚠️ 服务端会话寿命**未测**（见 SITE.md §5 的风险条） |
 | 列表页 | `https://www.ncss.cn/student/jobs/index.html`（**前端 JS 渲染**，数据靠登录后接口） |
 | 职位接口 | `/student/api/zeyuanhome/*` → **302 → /student/login.jsp**（即：需登录） |
 | 免登录接口 | `/student/api/news/list?limit=8` → **200 JSON**（就业资讯，可作 M1-M3 开发期数据） |

@@ -23,10 +23,10 @@
 
 - [x] 计划书 `docs/PLAN.md`
 - [x] 仓库地基：目录骨架、`.gitignore`、`.env.example`、`pyproject.toml`
-- [ ] M0 浏览器抓包补全站点档案（主人填了 `docs/SITE.md` 大头：CAS 登录字段、职位接口路径与分页参数、响应结构、**登录态 cookie 名**都到手了 —— `JSESSIONID`，`host-only` 落在 `www.ncss.cn`，`Path=/`，`HttpOnly`+`Secure`；**还差两格**：`§4` `offset` 是页码还是行号 / `§5` **服务端**会话寿命 —— 后者有一条不利线索：该 cookie 是 `Expires=会话`，而 `JSESSIONID` 是 Tomcat 默认名、默认超时仅"30 分钟不活动"，需真跑一次才能定）
+- [ ] M0 浏览器抓包补全站点档案（`docs/SITE.md` 大头都到手了：CAS 登录字段、职位接口路径与分页参数、响应结构、**登录态 cookie 实测快照** —— 业务会话是 `SESSION` @ `www.ncss.cn` `/student/`，`www.ncss.cn` 域共 13 条、CAS 域 8 条按域名排除；**还差两格**：`§4` `offset` 是页码还是行号 / `§5` **服务端**会话寿命 —— 后者有一不利线索：`SESSION` 是会话级 cookie（`expires=-1`），服务端超时未知，而同名的 `JSESSIONID`（CAS 域）正是 Tomcat 默认名、默认仅"30 分钟不活动"，需"今天登、明天跑"才能定）
 - [x] M1 LLM 裸调用 —— `scripts/m1_verify.py`
 - [x] M2a 工具层 · remoteok 替身 —— `scripts/m2_verify.py`
-- [ ] M2b 工具层 · ncss 真源 —— **Phase A + Phase B 代码均已落地**：`python -m app.main login` 半自动登录 + 登录态落盘（`agent/tools/auth.py`）+ 登录过期接线（`status=login_expired` → 退出码 3）；`sources/ncss.py` 照 `docs/SITE.md` 实现了解析与分页，`tests/test_ncss.py` 29 条离线断言（respx 假响应，**一次真实请求都不发**）。⚠️ **尚未端到端真跑**：翻页节流（≥3s）属 M8，未实现前真跑会背靠背拉页，违反本项目合规规则（详见 PLAN §M2 Phase B 对账第 6 条）
+- [ ] M2b 工具层 · ncss 真源 —— **Phase A + Phase B 代码均已落地，且已用真实登录态单页实证**：`python -m app.main login` 半自动登录 + 登录态落盘（`agent/tools/auth.py`）+ 登录过期接线（`status=login_expired` → 退出码 3）；`sources/ncss.py` 照 `docs/SITE.md` 实现解析与分页，`tests/test_ncss.py` 29 条离线断言（respx 假响应，**一次真实请求都不发**）。✅ **单页端到端已实测（2026-10-16）**：真实登录态 + 一次 GET → `flag=true`、10 条、raw 7425 字节（与档案分毫不差）。⚠️ **整份日报仍未真跑**：翻页节流（≥3s）属 M8，未实现前跑完整 flow 会背靠背拉页，违反本项目合规规则（详见 PLAN §M2 Phase B 对账第 6 条）
 - [x] M3 ReAct 主循环 —— `scripts/m3_verify.py`（第 8 项走真模型 + 真工具）
 - [x] M4a 编排加固：重试 / 超时 / 预算闸门 —— `scripts/m4_verify.py`
 - [x] M4b 确定性主流程：抓取 → 两阶段入库 → 摘要 → 渲染落盘 —— `scripts/m4b_verify.py`
