@@ -32,7 +32,8 @@
 - [x] M4b 确定性主流程：抓取 → 两阶段入库 → 摘要 → 渲染落盘 —— `scripts/m4b_verify.py`
 - [x] M5 状态管理：SQLite 建库 + 幂等写入 + 内容寻址存档 —— `scripts/m5_verify.py`
 - [x] M6 可观测：三层日志（`app.log` / `llm.log` / `var/traces/*.jsonl`）+ 成本看板 —— `scripts/m6_verify.py`
-- [ ] M7 评估 · M8 安全与推送 · M9 部署
+- [x] M7 评估：三层（L1 `pytest` 回归网 · L2 离线回放 · L3 摘要性质断言）—— `pytest` + `python -m eval.run_eval`
+- [ ] M8 安全与推送 · M9 部署
 
 > **M4b 留下的两件事**：① 真链路只跑过一次手工验证，还没被任何脚本盯住 ——
 > `m4b_verify.py` 全程离线（假数据源 + 假 LLM），真实网络/模型的形状由
