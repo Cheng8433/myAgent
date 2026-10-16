@@ -455,6 +455,51 @@ ncss 的登录链是 **学信网 CAS 账号密码 + 图形验证码**（见 §2.
 ### 自测题
 > 为什么 `query_jobs` 不接受 SQL 字符串参数？如果模型能传 SQL 会发生什么？
 
+> **2026-10-16 实现时改了五处（M2b Phase A 对账 —— 上面那份工具清单与登录设计
+> 照抄会撞墙，原因都记在这）。Phase A 只做「不依赖 M0 抓包」的那半；
+> 解析/分页留给 Phase B，理由见第 3 条。**
+> 1. **工具清单里的 `ensure_session()` 【不做成模型可见的工具】。**
+>    登录态由数据源内部处理：缺了或失效了就抛 `LoginExpired`，模型只在工具返回值里
+>    读到 `error="login_expired"` + 一句 hint（`python -m app.main login`）。
+>    理由是同一类纪律的第四次出场 —— 工具不碰 `run_id`（编排层的事）、Provider 不自己
+>    决定超时（上层的事）、数据源不碰磁盘（上层的事）：**别把系统状态交给模型去维护。**
+>    给模型一个 `ensure_session`，等于给它一条能把自己锁在门外的路径：
+>    它可能"为了保险"先调一次登录，或者在流程中途反复搓登录态，而这两件事
+>    对它没有任何收益、只会多出一条不确定的路径。
+>    `var/auth/` 的读写做成 `agent/tools/auth.py` 的普通函数（`save_state` / `load_state`），
+>    由 CLI 的 `login` 子命令与数据源各自调用 —— **没有一个 `@tool` 装饰器**。
+> 2. **凭证就用 Playwright `storage_state` 的【原生格式】，不自己发明一套。**
+>    它就是一个 `{"cookies": [...], "origins": [...]}` 的 dict。自己发明格式，
+>    在"哪天要改回浏览器运行时"的那一天会白写一遍转换层；而原生格式
+>    `context.add_cookies(state["cookies"])` 能直接喂回去。
+>    存进去的只有 cookie，**没有账号密码** —— 这不是"我们小心"，是**结构上**
+>    成立的：`storage_state` 里根本没有放 password 的格子，主人是在浏览器窗口里
+>    人工输入的。这条承诺钉在 `tests/test_auth.py::test_state_holds_no_credentials`。
+> 3. **M2b 拆成两段，分界线画在「要不要知道抓包结果」上。**
+>    · **Phase A（已做，不依赖 M0）**：登录态基础设施 + 三处接线
+>      （`except LoginExpired` 分支、`STATUS_LOGIN_EXPIRED`、CLI 退出码 3）。
+>      全部可离线验证 —— 用假源抛 `LoginExpired` 就能把整条链走一遍。
+>    · **Phase B（等主人抓完包）**：`sources/ncss.py` 的解析与分页。
+>      PLAN §M0 原文是"这一步是 M2 `fetch_job_list` 的**唯一依据**"，
+>      所以在拿到三件事实（CAS POST 字段、登录态 cookie 名、职位接口路径与分页参数）
+>      之前写解析代码就是猜 —— 猜出来的东西能跑通一次，改版那天死得不明不白。
+>    ★ 因此 **Phase A 刻意【不】创建 `sources/ncss.py`，连抛 `NotImplementedError`
+>      的占位都不建**：一个占位文件"看起来像做了"，而 `get_source()` 的 `ImportError`
+>      加上 `sources/__init__.py` 里那行注释，已经把"还没写"这件事说得很清楚。
+>      假绿灯是本项目最防的一件事。
+> 4. **`cmd_login` 的"登录成功"判据目前只能是【通用判据】**：URL 回到
+>    `www.ncss.cn` 且不在 `login.jsp` 上（`main._logged_in`）。
+>    硬探针（请求一次真职位接口、看是否仍 302）**要等 Phase B** —— 现在还不知道
+>    哪个路径是"必须登录才能访问"的，§2.1 只记到前缀 `/student/api/zeyuanhome/*`。
+>    把猜的端点写进成功判据，等于用一个可能错的东西去验收另一个东西。
+>    ★ 判据抽成了纯函数，所以它**能被离线单测**（`tests/test_login_expired.py`）——
+>    判定逻辑一旦埋在轮询循环里，验它就只能"真开一次浏览器手工试"。
+> 5. **登录过期也要写进 `runs.error`（判据从"是不是 failed"改成"有没有出问题"）。**
+>    看板的 `recent_errors` 是按 `error IS NOT NULL` 筛的。漏了 login_expired，
+>    "登录态过期"这条**唯一能自愈**的记录就永远不出现在看板上 ——
+>    而它恰恰是最该被一眼看见的一条。`success` / `no_items` 的 detail 是**说明**
+>    不是错误，照旧不写（塞进去会让"筛出所有出错的 run"当场失效）。
+
 
 ---
 

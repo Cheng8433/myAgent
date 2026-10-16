@@ -43,13 +43,14 @@ from agent.observability.trace import write_trace
 from agent.runtime.budget import Budget
 from agent.runtime.loop import StepRecord, run_agent
 from agent.tools.jobs import fetch_page
-from agent.tools.sources import SourceError
+from agent.tools.sources import LoginExpired, SourceError
 from agent.tools.sources.base import Job, JobPage
 from workflows.report import render_report, report_day, write_report
 
 STATUS_SUCCESS = "success"
 STATUS_FAILED = "failed"
 STATUS_NO_ITEMS = "no_items"
+STATUS_LOGIN_EXPIRED = "login_expired"
 """runs 表的【工作流】词表。
 
 ★ 它和 loop.py 的 RunResult.status 不是一套词。那是 ReAct 子循环的结局
@@ -59,8 +60,13 @@ STATUS_NO_ITEMS = "no_items"
   **两个词表各归其位**；子循环的结局不丢，它以一条
   StepRecord(kind="subrun") 落进 steps（见下面的 _summarize）。
 
-★ 将来的 login_expired（M2b 接 ncss 才会产出）也往这张表里加，
-  插点在 run_daily_report 抓取阶段的 except 分支上（那里有一行注释标着位置）。
+★ login_expired（M2b 接线，`except LoginExpired` 分支在下面抓取阶段）：
+  它是一个【需要人动手】的结局，和前三个都不同 —— success/no_items 是"跑完了"，
+  failed 是"坏了"。所以它在 CLI 上有自己的退出码 3（PLAN §M2 定的对外契约），
+  好让定时任务一眼分出"该叫我续期"和"该去看日志"。
+  回归钉在 tests/test_login_expired.py —— 尤其是"它必须排在 except SourceError
+  【之前】"这一条：LoginExpired 是 SourceError 的子类，顺序写反了不报错，
+  只会静默变成 failed。
 """
 
 MAX_PAGES = 50
@@ -92,7 +98,7 @@ class DailyReport:
     """一次日报的结局 —— 对外（CLI / 测试 / 将来的定时任务）的唯一交代。"""
 
     run_id: str
-    status: str  # success | failed | no_items（工作流词表，见上面的常量）
+    status: str  # success | failed | no_items | login_expired（工作流词表，见上面的常量）
     report_path: str = ""  # 相对 var/；失败或没数据时是空串
     inserted: int = 0  # 本次【新见到的】岗位数
     updated: int = 0  # 本次【以前见过、这次又刷新了】的岗位数
@@ -339,9 +345,11 @@ def run_daily_report(
             started_at=started_at,
             # ★ 判据不是"哪个 status 名"，而是【这次 run 有没有出问题】：
             #   成功/无数据的 detail 是"说明"不是"错误"，塞进 runs.error 会让
-            #   "筛出所有出错的 run"当场失效。
+            #   "筛出所有出错的 run"当场失效。而 login_expired 是【要人动手】
+            #   的坏结局（M2b）—— 漏了它，看板 recent_errors 就看不见
+            #   "登录态过期"这条最该被看见的记录，而它恰恰是唯一能自愈的那种。
             #   （NULL vs "" 的判据见 memory/store.py 的 record_run。）
-            error=detail if status == STATUS_FAILED else None,
+            error=detail if status in (STATUS_FAILED, STATUS_LOGIN_EXPIRED) else None,
         )
         trace_rel = write_trace(run_id, records, root=root)
         log.info(
@@ -371,11 +379,29 @@ def run_daily_report(
     fetch_t0 = time.monotonic()
     try:
         pages = fetch_all_pages()
+    except LoginExpired as exc:
+        # ★ 顺序是契约，不是风格：LoginExpired 是 SourceError 的【子类】，
+        #   写在父类后面这一支就永远进不来 —— 而它不报错，只会把
+        #   "请去续期"静默降级成一句"抓取失败"（归因错位，M4a-1 同一个病）。
+        #   回归钉：tests/test_login_expired.py（挪了顺序那条测试就红）。
+        #
+        # ★ 与失败支的分工在这儿体现得最清楚：两者都"没出日报"，但处置完全不同 ——
+        #   failed 要人去看日志（不知道哪里坏了），login_expired 只要跑一条命令。
+        #   所以它有自己的 status、自己的退出码、自己的 hint（tools/jobs.py 里）。
+        records.append(
+            StepRecord(
+                step=0,
+                kind="workflow",
+                detail="fetch",
+                ok=False,
+                error="login_expired",
+                latency_ms=_elapsed_ms(fetch_t0),
+                ts=datetime.now(UTC).isoformat(),
+            )
+        )
+        log.warning("login_expired", run_id=run_id, error=str(exc))
+        return finish(STATUS_LOGIN_EXPIRED, detail=str(exc))
     except SourceError as exc:
-        # ⤵ M2b：接入 ncss 之后，LoginExpired（SourceError 的子类）要在
-        #   【这一行之前】单独接走，翻成 runs.status="login_expired" + 退出码 3。
-        #   现在 remoteok 不可能抛它 —— 所以那一支写在这儿就是死代码，
-        #   而"看起来做完了、其实没人测过"正是本项目的假绿灯，故不写。
         records.append(
             StepRecord(
                 step=0,
