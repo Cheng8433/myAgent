@@ -90,9 +90,15 @@ class SourceError(Exception):
 
 
 class LoginExpired(SourceError):
-    """登录态失效。
+    """登录态不可用 —— 过期了，或者本机压根还没登录过。
 
-    ★ 这是 ncss 的【实测信号】（PLAN.md §2.1）：请求返回 302 → /student/login.jsp。
+    ★ 判据一（实测信号，PLAN.md §2.1）：请求返回 302 → 登录页。
+
+    ★ 判据二（M2b Phase B 补）：盘上没有可用的凭证。
+      `auth.AuthMissingError` 表达的是"这台机器还没登录过"，它刻意【不】继承
+      SourceError —— 因为"没登录过"和"源站坏了"是两种病。但对【上层】而言
+      它要走的还是这条路：处置一样（人工续期）、退出码一样（3）。
+      所以由 `sources/ncss.py` 把它翻成本类型，两种病因的差别写在【消息里】。
 
       单独立一个类型，是因为它需要的处置和别人【不同】——
       不是重试，而是告警 + 人工续期 + 优雅退出（退出码 3）。

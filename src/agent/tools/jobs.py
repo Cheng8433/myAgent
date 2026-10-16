@@ -138,7 +138,13 @@ def fetch_job_list(page: int = 1) -> dict[str, Any]:
             "items": [],
             "count": 0,
             "error": "login_expired",
-            "hint": f"登录态已过期，请运行 python -m app.main login 手动续期。（原因：{exc}）",
+            # ★ 措辞覆盖两种成因（过期 / 本机还没登录过）—— 这句话是【模型】
+            #   唯一读到的信息，说"已过期"而实际是"从没登录过"，模型就会
+            #   按"续一次期"来理解。处置虽然相同，但少一句误导是一句。
+            "hint": (
+                "登录态不可用（已过期，或本机还没有登录过），"
+                f"请运行 python -m app.main login 手动续期。（原因：{exc}）"
+            ),
         }
     except SourceError as exc:
         return {
