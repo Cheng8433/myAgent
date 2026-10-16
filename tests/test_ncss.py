@@ -53,9 +53,13 @@ def ncss_payload(ncss_bytes: bytes) -> dict:
 def _cookies() -> list[dict]:
     """三个 cookie：两个 ncss 域的、一个别人家的。
 
-    ★ 名字刻意是假的（`FAKE_*`）：**真的会话 cookie 名到现在还没确定**
-      （`docs/SITE.md` §3.2 那一格待填）。用 JSESSIONID 之类"看起来像真的"
-      的名字，哪天有人会误以为那就是线上答案。
+    ★ 名字仍然刻意是假的（`FAKE_*`），但理由换了。旧理由（"真名还没确定"）
+      已在 2026-10-16 失效：实测真名是 `SESSION`、且 `JSESSIONID` 属于 CAS 域
+      （见 `docs/SITE.md` §3.2）。新理由更硬：
+      本用例验的是【按域名筛选】这条机制，它**不该依赖任何一个具体的 cookie 名** ——
+      把线上真名写死进来，ncss 哪天换个名字，测试就会红，而那是个**假警报**；
+      更糟的是，它还会诱使人去"把测试改对"，而不是去看真问题。
+      （想看真名长什么样，看 `tests/test_auth.py::_state` —— 那里照实测写了真名。）
     """
     return [
         {"name": "FAKE_SESSION", "value": "abc", "domain": ".ncss.cn", "path": "/"},

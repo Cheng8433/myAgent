@@ -24,12 +24,28 @@ from agent.tools.auth import (
 
 
 def _state() -> dict:
-    """一份形状真实的 storage_state：ncss 的 + 别人的 + 无名的。"""
+    """一份形状【照实测】的 storage_state（名字与域名取自 2026-10-16 真机快照）。
+
+    ★ 为什么用真名真域、而不是随手编一个：这里原本写的是 `JSESSIONID` + `.ncss.cn`，
+      而实测快照里**根本不存在这个组合** —— `JSESSIONID` 属于 **CAS 域**
+      （`account.chsi.com.cn`，那台也跑 Tomcat），ncss 站的会话叫 **`SESSION`**。
+      假数据一旦"长得像真的、却不是"，将来有人照它反推，就会把已经推翻的结论
+      重推一遍 —— 而这次偏偏真的发生过（`docs/SITE.md` §3.2 一度就写成了 JSESSIONID）。
+    """
     return {
         "cookies": [
-            {"name": "JSESSIONID", "value": "abc", "domain": ".ncss.cn", "path": "/"},
-            {"name": "SERVERID", "value": "def", "domain": "www.ncss.cn", "path": "/"},
-            {"name": "CHSI_TICKET", "value": "zzz", "domain": ".chsi.com.cn", "path": "/"},
+            # 本站 · host-only（无前导点）：会话就落在这一层，实测 Path=/student/
+            {"name": "SESSION", "value": "abc", "domain": "www.ncss.cn", "path": "/student/"},
+            # 本站 · 父域（带前导点）：埋点常落在这层
+            {"name": "cna", "value": "def", "domain": ".ncss.cn", "path": "/"},
+            # 别人家（CAS 域）：必须被筛掉 —— 实测里的 JSESSIONID 正是在这儿
+            {
+                "name": "JSESSIONID",
+                "value": "zzz",
+                "domain": "account.chsi.com.cn",
+                "path": "/passport",
+            },
+            # 无名 cookie：发出去也没用，跳过而不是记成空串
             {"name": "", "value": "无名", "domain": ".ncss.cn", "path": "/"},
         ],
         "origins": [],
@@ -117,14 +133,14 @@ def test_save_rejects_wrong_shape_before_writing(tmp_path):
 def test_cookies_filtered_by_domain():
     """★ 别的域的 cookie 不许带出去（那是把别人家的凭据也交出去）。"""
     cookies = cookies_from_state(_state(), domains=("ncss.cn",))
-    assert cookies == {"JSESSIONID": "abc", "SERVERID": "def"}
+    assert cookies == {"SESSION": "abc", "cna": "def"}
 
 
 def test_parent_domain_token_matches_subdomains():
     """★ `.ncss.cn` 与 `www.ncss.cn` 都要命中父域片段 ——
     拿完整主机名去比会一个都匹配不上，而后果（空 cookie → 302）
     看起来像"刚存的登录态就过期了"，归因指向完全错误的方向。"""
-    assert set(cookies_from_state(_state(), domains=("ncss.cn",))) == {"JSESSIONID", "SERVERID"}
+    assert set(cookies_from_state(_state(), domains=("ncss.cn",))) == {"SESSION", "cna"}
 
 
 def test_state_holds_no_credentials(tmp_path):
