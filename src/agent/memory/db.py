@@ -151,6 +151,8 @@ SCHEMA = """
     ok                INTEGER,
     prompt_tokens     INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
+    latency_ms        INTEGER NOT NULL DEFAULT 0,
+    error             TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (run_id, seq),
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
   );
@@ -172,13 +174,43 @@ SCHEMA = """
 """
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """某张表现有的列名。用下标 [1] 而不是 row["name"]：PRAGMA 的返回形状
+    不依赖调用方的 row_factory，本函数才敢在任何连接上跑。"""
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # ★ 为什么需要这一段：`CREATE TABLE IF NOT EXISTS` 对【已存在】的表是空操作，
+    #   它【不会】补上新加的列。于是只改 SCHEMA 的后果是——新库三列俱全，
+    #   而主人手上那个 var/app.db（M5 建的）悄悄少两列，INSERT 时才报
+    #   "table steps has no column named latency_ms"。报错还算好的；
+    #   若哪天换的是"读"路径，少的列会变成"这列一直没有值"，没人发现。
+    #   M6 之前从没有过迁移，因为从没有过"给已存在的表加列"这件事。
+    #
+    # 表名/列名/类型全是本文件里的【字面量常量】，没有一处来自外部输入 ——
+    # 所以这里的 f-string 拼接不构成注入面（PLAN §M8 第三条禁的是
+    # "把模型给的参数拼进 SQL"，不是"代码自己拼自己的 schema 常量"）。
+    ("steps", "latency_ms", "INTEGER NOT NULL DEFAULT 0"),
+    ("steps", "error", "TEXT NOT NULL DEFAULT ''"),
+)
+"""历史库要补的列：(表, 列, 列定义)。新库因 SCHEMA 里已含，会被下面的
+"缺了才加"跳过 —— 同一段代码对两种库都对，不必分叉。"""
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """把 SCHEMA 灌进库。幂等 —— 每次启动都可以无脑调一次。
+    """把 SCHEMA 灌进库，再把历史库缺的列补上。幂等 —— 每次启动无脑调一次。
 
     ★ 用 executescript 而不是 execute：前者能一次跑多条语句（含注释与分号），
       后者只认一条。
       代价是 executescript 会先隐式 COMMIT 掉当前事务 —— 所以它【只适合建表】
       这种"本来就不需要和别的操作同一个事务"的场合，别拿它包业务写入。
+
+    ★ 建表之后必须补迁移，理由见 MIGRATIONS 的注释：IF NOT EXISTS 只保证
+      "表在"，不保证"列全"。这两件事是分开的，混为一谈就是老库静默缺列。
     """
     conn.executescript(SCHEMA)
+    for table, column, ddl in MIGRATIONS:
+        if column not in _columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
     conn.commit()

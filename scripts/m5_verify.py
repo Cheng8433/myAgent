@@ -60,8 +60,26 @@ def _raise(fn) -> str:
     return "没抛"
 
 
+# ★ 这里【点名列出列】而不是 `insert into steps values (?,...)`：
+#   位置式写法在 M6 给 steps 加了 latency_ms / error 两列之后，
+#   会当场变成 "table steps has 10 columns but 8 values were supplied" ——
+#   而这条报错指向的是"测试写坏了"，看不出"表加了两列"这个真正的起因。
+#   点名之后，加列不再打断它（新列走 DEFAULT），这台上量的是【主键】这件事，
+#   不该被无关的 schema 变动牵连。
+_INSERT_STEPS = (
+    "insert into steps"
+    " (run_id, seq, step, kind, detail, ok, prompt_tokens, completion_tokens)"
+    " values (?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
 def main() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+    # ★ ignore_cleanup_errors=True（同 m4b_verify）：Windows 上库里还开着连接时
+    #   临时目录删不掉，那条 PermissionError 会【盖住】真正的断言失败 ——
+    #   于是你对着"文件被占用"查半天，而真凶其实是上面某一行断言。
+    #   这条纪律本项目已经立法（见 logs.shutdown_logging / memory 关连接），
+    #   这里补上当初漏掉的一处。
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmp_path = Path(tmp)
 
         # ══════════════════════════════════════════════════════════
@@ -105,10 +123,10 @@ def main() -> None:
         )
 
         # ── 正面：现役主键 (run_id, seq) ──
-        conn.execute("insert into steps values (?, ?, ?, ?, ?, ?, ?, ?)", row)
+        conn.execute(_INSERT_STEPS, row)
         check(
             "正面：现役主键 (run_id,seq)，同一行插两次",
-            _raise(lambda: conn.execute("insert into steps values (?,?,?,?,?,?,?,?)", row)),
+            _raise(lambda: conn.execute(_INSERT_STEPS, row)),
             "IntegrityError",
         )
 
@@ -118,7 +136,7 @@ def main() -> None:
             "野 run_id（外键）",
             _raise(
                 lambda: conn.execute(
-                    "insert into steps values (?,?,?,?,?,?,?,?)",
+                    _INSERT_STEPS,
                     ("查无此run", 0, 1, "llm", "stop", None, 0, 0),
                 )
             ),

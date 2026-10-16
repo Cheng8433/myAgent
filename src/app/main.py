@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -37,7 +38,6 @@ EXIT_LOGIN_EXPIRED = 3
   不是"声明了没人读"的空钩子 —— M2b 接 ncss 之后它就活了。
 """
 
-
 def build_parser() -> argparse.ArgumentParser:
     """子命令表。
 
@@ -48,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="app.main", description="招聘信息日报 Agent")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("report", help="跑一次日报：抓取 → 入库 → 摘要 → 落盘")
+    board = sub.add_parser("board", help="看最近几天的成本与健康度（只读，不写任何文件）")
+    # ★ 默认值写成整数 7 而不是 "7"：type=int 负责把用户敲的字符串转过来，
+    #   而 default 不经过 type —— 写成 "7" 的话，不传 --days 时拿到的是字符串，
+    #   `days < 1` 会当场 TypeError（字符串和整数没法比大小）。
+    board.add_argument("--days", type=int, default=7, help="统计最近多少天（默认 7）")
     return parser
 
 
@@ -96,6 +101,7 @@ def cmd_report() -> int:
 
     from agent.llm.openai_compat import OpenAICompatProvider
     from agent.memory.db import connect, ensure_schema, new_run_id
+    from agent.observability.logs import LoggedProvider, configure_logging, shutdown_logging
     from agent.runtime.budget import Budget
     from workflows.daily_report import run_daily_report
 
@@ -104,12 +110,21 @@ def cmd_report() -> int:
     #     却永远成立，于是端到端那项永远静默跳过、末尾照样打 ✅。跳过必须是响的。）
     load_dotenv()
 
+    # ★ 日志必须在 run_daily_report 【之前】接上：那之后打的业务事件
+    #   （fetch_done / store_done / report_finished）才有个去处。
+    #   级别走 .env 的 LOG_LEVEL（缺省 INFO）—— 配置只在 .env 里有一个出处，
+    #   不在代码里另起一套（同 DB_PATH 那条纪律）。
+    configure_logging(level=os.getenv("LOG_LEVEL", "INFO"))
+
     conn = connect()
     try:
         ensure_schema(conn)  # 幂等，每次启动无脑调一次
         report = run_daily_report(
             conn,
-            OpenAICompatProvider(),
+            # ★ 包一层：把每次 LLM 调用写进 var/logs/llm.log（**脱敏后**的 messages）。
+            #   装饰器满足同一个 LLMProvider 协议，所以 workflows 一行都不用改 ——
+            #   这正是 M1 那层抽象该兑现的红利（见 logs.py 的 LoggedProvider）。
+            LoggedProvider(OpenAICompatProvider()),
             run_id=new_run_id(),
             budget=Budget.from_env(),
         )
@@ -117,14 +132,50 @@ def cmd_report() -> int:
         # ★ finally 而不是"正常路径上 close"：中途抛异常时连接才不会漏掉。
         #   进程退出会回收 fd，但显式关掉是把"这里就是它的终点"写在代码上。
         conn.close()
+        # ★ 日志句柄也要关，理由同上面那条，而且是 Windows 特有的：
+        #   被打开着的文件删不掉，而清理失败抛的那条 PermissionError
+        #   会盖住真正的失败（见 logs.shutdown_logging）。
+        shutdown_logging()
 
     return _report_outcome(report)
+
+
+def cmd_board(days: int = 7) -> int:
+    """打印最近 `days` 天的成本与健康度，返回退出码。
+
+    ★ 只读：它不跑日报、不写报告、也不落 trace —— 唯一可能的写入是
+      ensure_schema（首次在新机器上跑时建空表），而那是幂等的。
+      所以这里【不】configure_logging：看板没有业务事件要记，
+      建了日志文件反而是"跑一次看板就多两个文件"的无谓副作用。
+    """
+    from dotenv import load_dotenv
+
+    from agent.memory.db import connect, ensure_schema
+    from agent.observability.board import cost_summary, recent_errors, render_board
+
+    load_dotenv()
+
+    conn = connect()
+    try:
+        # 幂等。调它的理由：库里一张表都没有时（刚 clone、还没跑过日报），
+        # 不建表的话查询会抛 "no such table: runs" —— 而"还没跑过"明明是
+        # 一个正常的、该被好好说出来的状态，不该长得像故障。
+        ensure_schema(conn)
+        daily = cost_summary(conn, days=days)
+        errors = recent_errors(conn)
+    finally:
+        conn.close()
+
+    print(render_board(daily, errors, days=days))
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "report":
         return cmd_report()
+    if args.command == "board":
+        return cmd_board(args.days)
     # argparse 的 required=True 保证走不到这里。写成显式 raise 而不是
     # return EXIT_OK：将来加了子命令却忘了接分支时，宁可当场炸，
     # 也不要静默"成功"。

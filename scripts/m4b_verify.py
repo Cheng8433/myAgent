@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -99,7 +100,13 @@ class FakeLLM:
 
     ★ 它同样要遵守 Provider 契约第 3 条：回填真实 token 用量。
       填 0 的话，⑤ 里那条"runs 的 token = 子 run 的累计"就永远成立得毫无意义。
+
+    ★ M6 起协议多了 `model`（trace 要拿它做成本归因），所以这里也得报一个。
+      写死一个假的就行 —— 这台验收台关心的是"这个字段有没有被带下去"，
+      不是"模型名对不对"（那要真链路才验得了）。
     """
+
+    model = "fake-model"
 
     PROMPT_TOKENS = 100
     COMPLETION_TOKENS = 10
@@ -320,6 +327,39 @@ def main() -> None:
             "工作流那三条记的是阶段名",
             wf,
             ["fetch:1页/3条", "store:+3/~0", f"report:{rep.report_path}"],
+        )
+
+        # ★ M6 对账第 3 条那笔债的回归护栏：编排层那三条 workflow 留痕要各自在
+        #   【创建的这一刻】打 ts，而不是留空、退回落盘时刻。真实 run 抓到过退回
+        #   的样子：fetch/store 的 ts 落在 run 收尾的 .580，反而晚于它们之后才发生的
+        #   llm（.569）—— 按 ts 排序会得到一个物理上不可能的顺序。所以这里断言两件：
+        #   ① workflow 行都带着自己的 ts；② 整份文件的 ts 随行序单调不减
+        #      （行序 = records 的构建顺序 = 真实发生顺序）。
+        trace_lines = [
+            json.loads(ln)
+            for ln in (var_dir(root) / "traces" / f"run-{rep.run_id}.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if ln.strip()
+        ]
+        wf_lines = [x for x in trace_lines if x["kind"] == "workflow"]
+        check(
+            "★ workflow 留痕各自带 ts（不退回落盘时刻）",
+            all(x["ts"] for x in wf_lines),
+            True,
+            "退回落盘时刻的话三条同刻，回放的时间轴就糊了",
+        )
+        check(
+            "★ 每条也带 latency_ms（不是默认 0）",
+            all(isinstance(x["latency_ms"], int) and x["latency_ms"] >= 0 for x in wf_lines),
+            True,
+            "ts 给顺序、latency 给时长；少哪个都答不了 PLAN 自测题的「慢在哪一步」",
+        )
+        check(
+            "★ 文件的 ts 随行序单调不减（回放顺序 = 真实顺序）",
+            [x["ts"] for x in trace_lines] == sorted(x["ts"] for x in trace_lines),
+            True,
+            "之前 fetch/store 的 ts 晚于 llm —— 按 ts 排会得到一个物理上不可能的顺序",
         )
 
         tok = conn.execute("select prompt_tokens, completion_tokens from runs").fetchone()

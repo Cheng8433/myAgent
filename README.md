@@ -31,13 +31,16 @@
 - [x] M4a 编排加固：重试 / 超时 / 预算闸门 —— `scripts/m4_verify.py`
 - [x] M4b 确定性主流程：抓取 → 两阶段入库 → 摘要 → 渲染落盘 —— `scripts/m4b_verify.py`
 - [x] M5 状态管理：SQLite 建库 + 幂等写入 + 内容寻址存档 —— `scripts/m5_verify.py`
-- [ ] M6 可观测 · M7 评估 · M8 安全与推送 · M9 部署
+- [x] M6 可观测：三层日志（`app.log` / `llm.log` / `var/traces/*.jsonl`）+ 成本看板 —— `scripts/m6_verify.py`
+- [ ] M7 评估 · M8 安全与推送 · M9 部署
 
 > **M4b 留下的两件事**：① 真链路只跑过一次手工验证，还没被任何脚本盯住 ——
 > `m4b_verify.py` 全程离线（假数据源 + 假 LLM），真实网络/模型的形状由
 > `python -m app.main report` 手工确认。② 摘要那一趟如果 LLM 直接抛错，
 > 会走 `_summarize` 里那条 `except LLMError` 降级（日报照出，只有摘要是占位符）；
-> 这次调用的 token 用量无从得知，只能记 0，真正的账留给 M6 的 trace。
+> 这一支的 token 用量仍然只能记 0（异常没带回来）—— 但 M6 起失败这件事本身有了留痕
+> （一条 `kind="subrun"` / `error="llm_error"` 的 StepRecord 落进 trace）。
+> **正常路径**的用量现在同时进 `runs` 两个列与 trace 的 llm 行。
 
 ## 快速开始
 

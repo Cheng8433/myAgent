@@ -18,11 +18,19 @@
 ★ 三个业务出口都必须落 runs 留痕（success / failed / no_items）：
   收在 finish() 一个闭包里 —— 散开写三份 record_run，早晚会漏掉一条，
   而漏掉的往往正是 failed 那条，也就是最需要留痕的那条。
+
+★ M6 起，这同一个人口还负责另外两件事（都收在 finish() 里，理由一样）：
+  · 写 trace（var/traces/run-<run_id>.jsonl）—— 把编排层的步骤和子 run 的
+    步骤拼成一个文件。落盘放在【编排层】而不是循环里的理由见 loop.py 顶部；
+  · 把失败原因原文写进 runs.error（在此之前那一格一直是 NULL）。
+  加上业务日志（agent.observability.logs），一次 run 就有了三层痕迹：
+  app.log 说"发生了什么"、trace 说"为什么"、runs/steps 说"结果如何"。
 """
 
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,6 +38,8 @@ from pathlib import Path
 
 from agent.llm.base import LLMError, LLMProvider
 from agent.memory.store import record_run, store_page
+from agent.observability.logs import log
+from agent.observability.trace import write_trace
 from agent.runtime.budget import Budget
 from agent.runtime.loop import StepRecord, run_agent
 from agent.tools.jobs import fetch_page
@@ -48,6 +58,7 @@ STATUS_NO_ITEMS = "no_items"
   "列表为空"的时候循环压根没被调用过。
   **两个词表各归其位**；子循环的结局不丢，它以一条
   StepRecord(kind="subrun") 落进 steps（见下面的 _summarize）。
+
 ★ 将来的 login_expired（M2b 接 ncss 才会产出）也往这张表里加，
   插点在 run_daily_report 抓取阶段的 except 分支上（那里有一行注释标着位置）。
 """
@@ -63,6 +74,17 @@ MAX_PAGES = 50
 
 MAX_SUMMARY_LINES = 60
 """摘要那一趟最多看到多少条标题。够它概括，又不会让输入无限膨胀。"""
+
+
+def _elapsed_ms(t0: float) -> int:
+    """从 t0（`time.monotonic()` 的读数）到现在的毫秒数。
+
+    ★ 用 monotonic 而不是 `time.time()`：前者只会前进，后者会被系统对时往回拨 ——
+      一次 NTP 校时能让"耗时"算成负数，而负的时延会安静地进库、画出一条谁也
+      看不懂的曲线（同 `runtime/loop.py` 的 `_elapsed_ms`，理由同一条；
+      两处各留一份是因为它们服务的模块不同 —— 若出现第三个消费者，再抽出去）。
+    """
+    return round((time.monotonic() - t0) * 1000)
 
 
 @dataclass(frozen=True)
@@ -81,17 +103,17 @@ class DailyReport:
 def fetch_all_pages(max_pages: int = MAX_PAGES) -> list[JobPage]:
     """从第 1 页开始逐页抓，直到某页为空（翻到底）。异常【原样上抛】。
 
-    TODO(小程)：翻页循环 —— 两个出口各治一种病，写错一个是死循环。
+    两个出口各治一种病，写错一个是死循环：
 
       出口 ①（正常）：这一页 `page.jobs` 为空 → 抓完了，返回已收集的那些页。
         ★ 空页【不是错误】—— 它是"翻到底了"这个事实的表达
           （见 tools/jobs.py 里 fetch_job_list 的 docstring）。
           把空页也收进列表会让调用方的判空逻辑出错（"有一页"却不含岗位）。
       出口 ②（护栏）：已经抓满 max_pages 页还没停 → 也返回。
-        ★ 两个出口都返回同一个形状（页列表），但含义不同 ——
-          区分它们的信息是"日志级"的（真到底了 / 护栏拦住了）。
-          这一层还没有 logger（M6 接 structlog），先记下这笔损失：
-          现在只能靠返回的页数 == max_pages 反推，不精确。
+        ★ 两个出口都返回同一个形状（页列表），含义却不同 ——
+          区分它们的信息是"日志级"的。M6 之前这里没有 logger，只能靠
+          `len(pages) == max_pages` 反推；现在 run_daily_report 会把
+          "是走到底还是被护栏拦住"记进引了 trace 的那条 fetch 留痕里。
 
       ★ 异常【不】在这里翻译：SourceError 直接上抛，由 run_daily_report
         的 except 记 failed。"抓取失败"和"抓到了但一页都没有"是两回事，
@@ -100,8 +122,6 @@ def fetch_all_pages(max_pages: int = MAX_PAGES) -> list[JobPage]:
 
       ★ 页号从 1 开始（`fetch_page(page)` 也做了一次 `max(1, page)` 兜底，
         那才是所有调用的必经之地；这里从 1 起步就好）。
-
-    可用：`fetch_page(page) -> JobPage`（异常原样上抛）、MAX_PAGES。
     """
     pages: list[JobPage] = []
     for page in range(1, max_pages + 1):
@@ -111,9 +131,6 @@ def fetch_all_pages(max_pages: int = MAX_PAGES) -> list[JobPage]:
             # 收进去会让调用方的判空逻辑看到"有一页"却不含任何岗位。
             break
         pages.append(jobpage)
-    # 出口②：循环自然走完 = 抓满 max_pages 页还没遇到空页，被护栏拦住了。
-    # 两个出口返回同一个形状（页列表），区分它们的信息只能靠 `len(pages) == max_pages`
-    # 反推 —— 精确的区分要等 M6 的 logger，这笔损失记在 docstring 里了。
     return pages
 
 
@@ -198,7 +215,24 @@ def _summarize(
     except LLMError as exc:
         return (
             "",
-            [StepRecord(step=0, kind="subrun", detail=f"llm_error:{type(exc).__name__}")],
+            [
+                StepRecord(
+                    step=0,
+                    kind="subrun",
+                    detail=f"llm_error:{type(exc).__name__}",
+                    # ★ 机器可读的代号与给人读的 detail 分开（见 StepRecord.error）：
+                    #   想筛"所有因 LLM 挂掉而降级的 run"，认这一个词就够，
+                    #   不必去 LIKE detail 里的 ":LLMTransientError" 那种措辞。
+                    error="llm_error",
+                    ts=datetime.now(UTC).isoformat(),
+                    # ★ 键名【不是】"run_id"：那个名字在 trace 的一行里已经被
+                    #   工作流自己的 run_id 占了（见 trace._CORE_KEYS），
+                    #   撞上去会被 trace._line 当场 ValueError 拦下 ——
+                    #   这不是我预判到的，是 m4b_verify 跑出来的：碰撞护栏
+                    #   替我们拦下了"子 run 的 id 冒充整次 run 的 id"这件事。
+                    extra={"sub_run_id": f"{run_id}-summary"},
+                )
+            ],
             0,
             0,
         )
@@ -209,6 +243,15 @@ def _summarize(
             step=0,
             kind="subrun",
             detail=result.status,
+            ts=datetime.now(UTC).isoformat(),
+            # ★ 子 run 的身份落在这里（M6 兑现 loop.py 那句"子 run 身份该有个家"）：
+            #   整次 workflow run 只写【一个】trace 文件，里面既有编排层的步骤、
+            #   也有子 run 的步骤，所以子 run 的 id 不再是文件名的一部分 ——
+            #   它挂在代表那次子 run 的这条留痕上。这样只有一个文件、一份事实，
+            #   而"哪几条属于摘要那一趟"照样一眼可辨。
+            #   ★ 键名是 sub_run_id 而不是 run_id —— 后者是 trace 固定列之一，
+            #     撞了会被 trace._line 用 ValueError 拦下（见上面那条同名注释）。
+            extra={"sub_run_id": f"{run_id}-summary"},
             # ★ 这一条的 token 刻意留 0：子 run 的用量已经逐轮记在上面那些
             #   llm 记录里了（每轮一条、单轮值）。这里再填一次累计值，
             #   任何"把 steps 的 token 求和"的人都会【多算一遍】——
@@ -269,6 +312,22 @@ def run_daily_report(
 
         ★ 这里读的是外层函数的变量（闭包），不是拷贝：所以 finish 被调用前
           对 records / tokens / inserted 的每一次更新，它都看得见。
+
+        ★ M6 起这个出口做三件事，顺序也是契约：
+          ① record_run —— 【主出口】。库是那份"一定要留下"的痕迹，
+             它先落，因为后面两件都是"锦上添花"，不能挡在它前面。
+          ② write_trace —— 同一批 records 的【完整快照】落 var/traces/。
+             放在①之后：万一写文件抛错（磁盘满、权限），runs 表已经记下了
+             "这次 run 存在且失败"，不会留下一段"看板里没有、trace 里也没有"的空白。
+             ★ 反过来（先写 trace 再落库）不行：那会让一个 IO 错误吞掉
+               整条 runs 记录 —— 而 runs 记录是查询"这天跑没跑"的唯一入口。
+          ③ 业务日志 —— 一条给人读的事件（`grep report_finished`）。
+             它是【第三份】痕迹，但和前两份不重复：JSON 日志是流水账（含时间、
+             含 detail 原文），库 answers "结果如何"，trace answers "为什么"。
+             （三层痕迹的分工见本模块顶部那段 M6 说明。）
+
+        ★ 三层痕迹都长在【这一个闭包】里，理由和最初"三个业务出口都留痕"
+          是同一个：散开写迟早漏一处，而漏掉的往往是最需要留痕的那条。
         """
         record_run(
             conn,
@@ -278,6 +337,23 @@ def run_daily_report(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             started_at=started_at,
+            # ★ 判据不是"哪个 status 名"，而是【这次 run 有没有出问题】：
+            #   成功/无数据的 detail 是"说明"不是"错误"，塞进 runs.error 会让
+            #   "筛出所有出错的 run"当场失效。
+            #   （NULL vs "" 的判据见 memory/store.py 的 record_run。）
+            error=detail if status == STATUS_FAILED else None,
+        )
+        trace_rel = write_trace(run_id, records, root=root)
+        log.info(
+            "report_finished",
+            run_id=run_id,
+            status=status,
+            report_path=report_path,
+            inserted=inserted,
+            updated=updated,
+            total=total,
+            trace_path=trace_rel,
+            detail=detail,
         )
         return DailyReport(
             run_id=run_id,
@@ -290,6 +366,9 @@ def run_daily_report(
         )
 
     # ── ① 抓取（只读阶段：这一阶段失败，库一行都没动） ──
+    # ★ fetch_t0 在【try 之外】取：失败支也要能量出"抓到第几页才崩"的耗时，
+    #   而它是只读阶段里唯一能说明"慢在哪"的数（远程一次全量抓取可能好几分钟）。
+    fetch_t0 = time.monotonic()
     try:
         pages = fetch_all_pages()
     except SourceError as exc:
@@ -297,13 +376,37 @@ def run_daily_report(
         #   【这一行之前】单独接走，翻成 runs.status="login_expired" + 退出码 3。
         #   现在 remoteok 不可能抛它 —— 所以那一支写在这儿就是死代码，
         #   而"看起来做完了、其实没人测过"正是本项目的假绿灯，故不写。
-        records.append(StepRecord(step=0, kind="workflow", detail="fetch", ok=False))
+        records.append(
+            StepRecord(
+                step=0,
+                kind="workflow",
+                detail="fetch",
+                ok=False,
+                latency_ms=_elapsed_ms(fetch_t0),
+                ts=datetime.now(UTC).isoformat(),
+            )
+        )
+        log.warning("fetch_failed", run_id=run_id, error=f"{type(exc).__name__}: {exc}")
         return finish(STATUS_FAILED, detail=f"{type(exc).__name__}: {exc}")
 
     jobs: list[Job] = [job for page in pages for job in page.jobs]
     records.append(
-        StepRecord(step=0, kind="workflow", detail=f"fetch:{len(pages)}页/{len(jobs)}条", ok=True)
+        StepRecord(
+            step=0,
+            kind="workflow",
+            detail=f"fetch:{len(pages)}页/{len(jobs)}条",
+            ok=True,
+            latency_ms=_elapsed_ms(fetch_t0),
+            # ★ ts 在【创建记录的这一刻】打，不是落盘时打：落盘是整批一次性做的，
+            #   那时再取 now() 只会得到"这一批被写下去的时刻"，所有 workflow 行同刻，
+            #   回放的时间轴就糊了（M6 对账第 3 条、真实 run 已见到的"次优回退"）。
+            ts=datetime.now(UTC).isoformat(),
+        )
     )
+    # ★ 抓了多少【只在日志里】说全：detail 那行是给 trace 和 steps 表的，
+    #   而"翻到第几页、是走到底还是被护栏拦住"是排查时第一眼要看的东西 ——
+    #   它进不了库（steps 表不存这种自由文本的分解），所以落在这里。
+    log.info("fetch_done", run_id=run_id, pages=len(pages), jobs=len(jobs))
 
     # ── ② 判空：抓到了，只是没有岗位 ──
     # "没有岗位"不是错误：不写库、不写报告，但要【明确地】说清楚 ——
@@ -312,14 +415,23 @@ def run_daily_report(
         return finish(STATUS_NO_ITEMS, detail="抓取成功，但一条岗位都没有")
 
     # ── ③ 入库（写入阶段开始；到这一步为止都已经确认拿到了数据） ──
+    store_t0 = time.monotonic()
     for page in pages:
         counts = store_page(conn, page, run_id=run_id, root=root)
         inserted += counts["inserted"]
         updated += counts["updated"]
     total = len(jobs)
     records.append(
-        StepRecord(step=0, kind="workflow", detail=f"store:+{inserted}/~{updated}", ok=True)
+        StepRecord(
+            step=0,
+            kind="workflow",
+            detail=f"store:+{inserted}/~{updated}",
+            ok=True,
+            latency_ms=_elapsed_ms(store_t0),
+            ts=datetime.now(UTC).isoformat(),
+        )
     )
+    log.info("store_done", run_id=run_id, inserted=inserted, updated=updated, total=total)
 
     # ── ④ 摘要（ReAct 在这条线里唯一的出场点） ──
     summary, sub_records, sub_prompt, sub_completion = _summarize(
@@ -332,6 +444,7 @@ def run_daily_report(
     # ── ⑤ 渲染 + 落盘 ──
     # ★ day 只取一次，同时喂给渲染和落盘：两处各取一次 now() 就可能跨过午夜 ——
     #   标题写着 10-04、文件却叫 10-05.md，而两边都不报错。
+    report_t0 = time.monotonic()
     day = report_day()
     markdown = render_report(
         jobs,
@@ -341,7 +454,16 @@ def run_daily_report(
         generated_at=datetime.now(UTC).isoformat(),
     )
     report_path = write_report(markdown, day=day, root=root)
-    records.append(StepRecord(step=0, kind="workflow", detail=f"report:{report_path}", ok=True))
+    records.append(
+        StepRecord(
+            step=0,
+            kind="workflow",
+            detail=f"report:{report_path}",
+            ok=True,
+            latency_ms=_elapsed_ms(report_t0),
+            ts=datetime.now(UTC).isoformat(),
+        )
+    )
 
     # ── ⑥ 落库（在 finish 里） ──
     return finish(STATUS_SUCCESS, report_path=report_path)

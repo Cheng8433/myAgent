@@ -44,6 +44,9 @@ def budget_of(max_steps: int) -> Budget:
 class ScriptedLLM:
     """照着剧本走的假 Provider。第 n 次 chat() 返回第 n 条预设响应。"""
 
+    # M6 起协议多了 `model`（trace 拿它做成本归因）；假 Provider 也要报一个。
+    model = "scripted-fake"
+
     def __init__(self, responses: list[LLMResponse]) -> None:
         self._script = list(responses)
         self.calls: list[list[dict[str, Any]]] = []

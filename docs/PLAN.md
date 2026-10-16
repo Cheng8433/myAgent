@@ -455,6 +455,7 @@ ncss 的登录链是 **学信网 CAS 账号密码 + 图形验证码**（见 §2.
 ### 自测题
 > 为什么 `query_jobs` 不接受 SQL 字符串参数？如果模型能传 SQL 会发生什么？
 
+
 ---
 
 ## M3 · ReAct 主循环（核心中的核心）
@@ -820,6 +821,61 @@ GROUP BY d ORDER BY d;
 ### 自测题
 > 某天日报没生成。只给你 trace 文件，你能在几分钟内定位是「登录挂」「站点改版」还是「LLM 挂了」吗？如果不能，你的 trace 缺了什么字段？
 
+> **2026-10-09 实现时改了七处（M6 对账 —— 上面那个 trace 样例是「拍平的一行」，真做起来列要分两层，原因都记在这）。**
+> 1. **trace 的一行分成「固定列」与 `extra` 两层，不是样例里那样平铺。**
+>    固定九列（ts / run_id / step / kind / detail / ok / prompt_tokens /
+>    completion_tokens / latency_ms）每行都有；而 `model` / `tool_calls` /
+>    `args_digest` 只属于某一类步，进 `extra`。理由同 `steps` 表：铺成具名字段会
+>    让一半的列对任何一行都是 NULL。
+>    ★ 并且 `extra` 里出现固定列名会**当场 ValueError** —— 撞名一旦静默覆盖，
+>    trace 看上去还挺正常。这条护栏是 `m4b_verify` 跑出来的：它替我们拦下了
+>    「子 run 的 id 冒充整次 run 的 id」（见 `daily_report._summarize`）。
+> 2. **`latency_ms` / `error` 落进 `steps` 表，`model` / `tool_calls` / `args_digest`
+>    只进 trace。** 判据是「要不要用 SQL 聚合」：时延要画曲线、error 要筛选，所以进库；
+>    模型点了几单是「看一眼就够」的细节。
+>    连带：`steps` 表补两列 ⇒ 需要**迁移机制** —— `CREATE TABLE IF NOT EXISTS`
+>    不会给老表加列，所以 `db.py` 新增 `MIGRATIONS`，`ensure_schema` 用 PRAGMA
+>    读出缺哪列再 `ALTER TABLE`（老库原地补齐，可重复执行）。
+> 3. **`ts` 由「产生留痕的那一层」打，留空才退回落盘时刻。** 落盘是一次 run 结束后
+>    批量做的，那时再取 `now()` 只会得到「这一批被写下去的时刻」——所有行同一个时间戳。
+>    ★ 这条债**当天就现形、当天就还了**：第一次真跑时编排层那几条 `workflow` 留痕还没设
+>    `ts`，于是退回落盘时刻，文件里出现「行的顺序与 ts 不一致」（ts=.580 的 fetch/store
+>    排在了 .569 的 llm 之后，可它们明明【发生在】llm 之前）。修法是 `daily_report.py`
+>    里 fetch / store / report 三条留痕各自在**创建的那一刻**打 `ts`，并各自量一个
+>    `latency_ms`（fetch 那一趟真跑了约 4 分钟，之前记成 0 —— 等于把「慢在哪一步」
+>    这条唯一的线索丢了）。回归护栏在 `m4b_verify.py` 第 ⑤ 节：
+>    workflow 行都带 `ts` + 整份文件的 `ts` 随行序单调不减。
+> 4. **`model` 进了 `LLMProvider` 协议**（`base.py` 加 `model: str`，实现里 `self._model`
+>    改成公开 `self.model`）。trace 每行要记 model；私有名会让协议那条声明变成空话，
+>    而调用方有权知道自己在跟谁说话。对照 M1 那条纪律：Provider 不替上层决定超时 ——
+>    反过来，上层有权向 Provider 问它的身份。
+> 5. **看板读【库】不读 trace 文件。** `runs` 的那两个列本来就是为聚合而生的，读几十个
+>    JSONL 再求和，等于把库里的账手工重算一遍（重算就会对不上，同「一个事实两个出处」）。
+>    另：`started_at` 是带 `T`、带 `+00:00` 的 ISO8601，而 `datetime('now','-7 days')`
+>    是空格分隔、无偏移 —— 两种格式直接比字符串只在「日期不同」时碰巧对，所以两边都过
+>    一遍 `datetime()` 归一化再比（不靠巧合）。
+> 6. **日志分层靠 structlog 官方「绕道 stdlib logging」的配方，脱敏做成管线处理器。**
+>    要两个文件（app.log / llm.log），而 structlog 的 logger_factory 是全局单例、一次
+>    只能指一个输出，所以借 stdlib 的 logger 层级来分：`llm.log` 走 `"agent.llm"` 且
+>    `propagate=False`（不关就会顺着层级冒到 root，同一条同时进 app.log = 两个出处）。
+>    脱敏挂在**出站口**（处理器）而不是每个调用点自己调 —— 写给日志的人会忘，管线不会。
+>    LLM 那一路用 `LoggedProvider` 包在 Provider 外面（Provider 才是「一次请求」的单位），
+>    循环一行不改。
+>    ⚠️ **一处实测抓出的事故**：脱敏的「键名启发式」（含 `token` 的键就整块盖掉）把
+>    `prompt_tokens` / `completion_tokens` 双双盖成 `***` —— 恰是成本归因最该看清的两个数，
+>    而且是**静默**替换（日志看上去一切正常）。修法是补一条判据：键名命中时，
+>    **值确实是字符串**才整块盖掉（凭据在 JSON 里一定是字符串，计数一定是数字）。
+>    **认类型是判据，猜名字是碰运气**。回归断言落在 `m6_verify.py` 的脱敏考点。
+> 7. **app.log 挂了一道「白名单」filter：只收 `"agent"` 树的记录。** 上面那张分层表
+>    说了 app.log 装「业务日志」，但没说谁**不许**进来 —— 而 httpx（openai SDK 底下
+>    也是它）每次请求都往 root 打一条 INFO（`HTTP Request: GET ... "HTTP/1.1 200 OK"`），
+>    顺着冒泡就进了 app.log，而且因为它不是 `"agent"` 发的、拿不到
+>    `add_log_level` / `add_logger_name`，**唯独缺 `level` / `logger` 两个键** ——
+>    一眼就看出是外来的。判据按【谁说的】筛，不按"谁叫 httpx"（调级别的写法是打地鼠，
+>    挡了 httpx 还有 openai / httpcore / urllib3）。不会漏故障：请求失败已经作为
+>    【带类型的异常】进了我们自己的留痕（`fetch_failed` / `llm_error` / `runs.error`）。
+>    回归断言在 `m6_verify.py` 第 ⑥ 节：第三方 INFO 确实冒到了 root，但不进 app.log。
+
 ---
 
 ## M7 · 评估
@@ -873,6 +929,7 @@ LLM 输出不稳定，所以**不能断言字符串相等**。改为断言**可�
 
 ### 自测题
 > 你的日报摘要里出现了输入数据中不存在的岗位链接。你会怎么设计一条断言来防止它？这条断言在真实运行时怎么用？
+
 
 ---
 

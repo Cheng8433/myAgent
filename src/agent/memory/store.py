@@ -206,6 +206,7 @@ def record_run(
     prompt_tokens: int,
     completion_tokens: int,
     started_at: str,
+    error: str | None = None,
 ) -> None:
     """把一次 run 的结局写进 runs（一行）+ steps（一条 StepRecord 一行）。
 
@@ -226,10 +227,17 @@ def record_run(
       而 steps 是"这次 run 一共发生了这些事"（一个整体）。整体就该整体替换，
       逐行 upsert 反而会在"这次比上次少了 3 步"时留下 3 条孤儿。
 
-    ★ runs.error 这一格现在写 NULL：错误原文属于 M6 的 trace。
-      留空是诚实的（"还没有"），填 "" 是撒谎（"什么都没有"）。
+    ★ runs.error 从 M6 起【有值了】：调用方把失败原因原文递进来（见 error 参数）。
+      在那之前它一直写 NULL。留空是诚实的（"还没有"），填 "" 是撒谎
+      （"什么都没有"）—— 所以这里对"没给"与"给了空串"区别对待：
+      没给就写 NULL，给了（哪怕空串）就照写。判据是 `is None`，不是真假。
 
-    断言在 scripts/m5_verify.py 的第 ⑦ 节 —— 那里就是你的反馈回路。
+    ★ steps 的 latency_ms / error 两列也是 M6 补的（列本身见 db.py 的 SCHEMA
+      与 MIGRATIONS）。它们是"能用 SQL 聚合的那部分"—— 时延画曲线、
+      错误代号筛选 —— 而 model / tool_calls / args_digest 那种"看一眼就够"的
+      细节不进库，只进 trace（判据见 StepRecord 的 docstring）。
+
+    断言在 scripts/m5_verify.py 的第 ⑦ 节、scripts/m6_verify.py —— 那儿就是反馈回路。
     """
     finished_at = datetime.now(UTC).isoformat()
     conn.execute(
@@ -254,7 +262,7 @@ def record_run(
             len(steps),
             prompt_tokens,
             completion_tokens,
-            None,
+            error,
         ),
     )
     # ★ 这里【不】把 started_at 放进 DO UPDATE 的 SET：
@@ -281,8 +289,8 @@ def record_run(
         """
         INSERT INTO steps (
             run_id, seq, step, kind, detail, ok,
-            prompt_tokens, completion_tokens
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            prompt_tokens, completion_tokens, latency_ms, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -294,6 +302,8 @@ def record_run(
                 record.ok,  # bool | None 原样交出 → sqlite3 存成 1 / 0 / NULL
                 record.prompt_tokens,  # 单轮值，别传累计值
                 record.completion_tokens,
+                record.latency_ms,
+                record.error,
             )
             for seq, record in enumerate(steps)
         ],

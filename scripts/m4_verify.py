@@ -77,7 +77,10 @@ class RoundScript:
 
     ★ 契约第 3 条（回填真实 token 用量）必须照做 —— 假 Provider 也要守契约，
       否则测的是假货的行为，不是真货的行为（M3 就在这栽过一次）。
+    ★ M6 起契约还多了 `model`（trace 拿它做成本归因），所以这里也得报一个。
     """
+
+    model = "roundscript-fake"
 
     def __init__(
         self,
@@ -261,6 +264,9 @@ print("\n═══ 工具超时（spec.timeout 终于被消费）")
 
 class Scripted:
     """照着剧本走的假 Provider。第 n 次 chat() 返回第 n 条响应。"""
+
+    # M6 起协议多了 `model`（trace 拿它做成本归因）；假 Provider 也要报一个。
+    model = "scripted-fake"
 
     def __init__(self, responses: list[LLMResponse]) -> None:
         self._script = list(responses)

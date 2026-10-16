@@ -27,16 +27,30 @@
   · 退避重试 —— 不在这里，在【工具层】（jobs.py）。位置的道理见那里的注释：
     异常一旦被翻译成返回值，"重试"就不存在了，所以重试必须落在翻译之前。
 
+已接上（M6）：
+  · 每步的留痕里有了时延与错误代号（StepRecord.latency_ms / error / extra）。
+    ★ 但【本文件不写 trace 文件】—— 落盘是调用方的事（workflows/daily_report.py
+      在一次 run 的出口写 var/traces/run-<run_id>.jsonl）。理由有两条：
+      ① 循环自己写文件，测试跑一次就污染主人的 var/，除非再加一个"要不要写"的开关，
+         而开关意味着"忘了传就静默丢 trace"—— 正是本项目最恨的那种漏；
+      ② 一次 workflow run 要把【编排层的步骤】和【子 run 的步骤】拼进同一个文件，
+         拼装点天然在编排层，不在循环里。
+      ⚠️ 由此认下的一处诚实：llm.chat() 自己抛错时，那一轮【没有留痕】——
+        异常是原样上抛的（见下面 Reason 那段），记录随栈帧一起没了。
+        那次失败由调用方在 trace 里留一条 kind="subrun" 的降级记录代替。
+
 尚未实现（后面的里程碑负责，现在【别】做）：
-  · 每步落 JSONL trace                → M6
   · 工具白名单与权限                  → M8
 """
 
+import hashlib
 import json
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
@@ -84,8 +98,14 @@ class StepRecord:
        Python 侧不会报错，只有读表的人会被误导。加值请在这里登记。
 
     step 的语义是"【子 run 内】的第几轮"。编排层的步骤不属于任何一轮，
-    约定用 step=0（"不是某一轮"）。⏳ 已知损失：两次子 run 的 step 编号
-    拼在一起会重来 —— 真正能分辨子 run 身份的是 M6 的 per-run JSONL。
+    约定用 step=0（"不是某一轮"）。
+
+    ★ M6 补了四个字段，它们分两类，别混（同 memory/store.py 那条"两类列"）：
+      · 进库的（steps 表的列，能拿来做聚合查询）：latency_ms、error
+      · 只进 trace 的（observability/trace.py 序列化时并进那一行）：ts、extra
+      区分它们的判据是「要不要用 SQL 聚合」——latency 要画曲线、error 要筛选，
+       所以进库；而 model / tool_calls / args_digest 只是"看一眼就够"的细节，
+        进库就得为每一类步都预留一堆永远为 NULL 的列。见 extra 的注释。
     """
 
     step: int
@@ -94,6 +114,35 @@ class StepRecord:
     ok: bool | None = None  # tool 步是工具报告的成功与否；其余多为 None
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    latency_ms: int = 0
+    """这一步耗了多久（毫秒）。★ 用整数毫秒而不是 float 秒：
+    进库是 INTEGER 列，浮点进 SQLite 会带上一串二进制小数尾巴，
+    而"这一步 1840 毫秒"本来就比"1.8400000000000001 秒"更该被记下来。"""
+
+    error: str = ""
+    """机器可读的【错误代号】（如 source_error / tool_crashed），不是给模型看的 hint。
+    ★ 和 detail 分开：detail 是"这步叫什么"（工具名），error 是"这步怎么了"。
+    合成一个字符串列的话，想筛"所有 tool_crashed 的步"就得靠 LIKE 去猜，
+    而字符串匹配会随着 hint 措辞变化悄悄失配 —— 不会报错，只会少查出一批。"""
+
+    ts: str = ""
+    """这一步【发生】的时刻（UTC ISO8601）。★ 必须由产生它的那一层打：
+    落盘是批量做的（在一次 run 结束之后），那时再 datetime.now() 就只能得到
+    "这一批被写下去的时刻"——所有行同一个时间戳，把"哪一步最慢/顺序如何"
+    这条最有用的线索抹成一片。留空时 trace 层退回到落盘时刻（次优，写明在那边）。"""
+
+    extra: Mapping[str, Any] = field(default_factory=dict)
+    """只进 trace 的细枝末节：llm 行放 model / tool_calls，tool 行放 args_digest。
+    ★ 为什么是 dict 而不是再开几个具名字段：这些字段每种 kind 各不相同
+      （llm 有 model、tool 有 args_digest），铺成具名字段的话，一张表里
+      一半的列对任何一行都是 NULL —— 那正是本项目反复在躲的
+      "声明了但没人消费"。dict 让"某一类步独有的东西"各归各，
+      代价是没有静态类型：读它的人得知道 key 从哪来，所以每个 key 在这里登记：
+        llm 行： {"model": "deepseek-chat", "tool_calls": ["fetch_job_list", ...]}
+        tool 行：{"args_digest": "<sha1 前 12 位>"}
+      （★ 存摘要而不存原文，理由同 PLAN §M6：参数里可能有敏感信息，
+        而且一页 20 条的工具参数原样进 trace 会让文件迅速膨胀。
+        摘要只回答一个问题——"这两次点的是不是同一单"，够用。）"""
 
 
 @dataclass(frozen=True)
@@ -130,6 +179,31 @@ class RunResult:
     steps: tuple[StepRecord, ...] = ()
     prompt_tokens: int = 0
     completion_tokens: int = 0
+
+
+def _now_iso() -> str:
+    """此刻的 UTC ISO8601 —— 由【产生留痕的那一层】调用（见 StepRecord.ts）。"""
+    return datetime.now(UTC).isoformat()
+
+
+def _elapsed_ms(t0: float) -> int:
+    """从 t0（time.monotonic 的读数）到现在的毫秒数。
+
+    ★ 用 monotonic 而不是 time.time()：前者只会前进，后者会被系统对时往回拨 ——
+      一次 NTP 校时能让"耗时"算成负数，而负的时延会安静地进库、画出一个
+      谁也看不懂的曲线。上面预算闸门量墙钟用的也是 monotonic，同一个理由。
+    """
+    return round((time.monotonic() - t0) * 1000)
+
+
+def _digest(text: str) -> str:
+    """把工具参数洗成一个短摘要。★ 只回答「这两次点的是不是同一单」。
+
+    不存原文（PLAN §M6）：参数里可能有敏感信息，且一页 20 条原样进 trace
+    会让文件迅速膨胀。12 位十六进制（48 bit）足够区分同一批里的重复调用，
+    而它【不是】用来防碰撞的强标识 —— 拿它当主键是误用，这里只当指纹看。
+    """
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
 def _call_tool(spec: ToolSpec, kwargs: dict[str, Any]) -> Any:
@@ -230,7 +304,11 @@ def run_agent(
         # 判据用 wants_tools，不看 content 空不空：content 可能只是一句开场白
         # （"我来查一下"），非空不代表答完。M1 把它做成属性，就是为了让
         # 这个判据只有一个出口 —— 少一处写错的地方。
+        t0 = time.monotonic()
         resp = llm.chat(messages=messages, tools=tools)
+        # ★ 时延必须夹在调用两侧量：写在别处（比如根据两轮的时间戳相减）
+        #   会把"我们的拼接/解析"也算进去，而那恰恰是该被排除的噪音。
+        llm_ms = _elapsed_ms(t0)
         # 用量分两路，别混：变量里累加的是【累计值】（RunResult 汇总用），
         # 下面写进 StepRecord 的必须是【单轮值】（M6 靠它画成本曲线）。
         prompt_tokens += resp.prompt_tokens
@@ -243,6 +321,11 @@ def run_agent(
                 detail=resp.finish_reason,
                 prompt_tokens=resp.prompt_tokens,
                 completion_tokens=resp.completion_tokens,
+                latency_ms=llm_ms,
+                ts=_now_iso(),
+                # model 由 Provider 提供（协议上的一条属性，见 llm/base.py）：
+                # 同一份 trace 里混了两个模型的用量时，没有它就没法归因成本。
+                extra={"model": llm.model, "tool_calls": [c.name for c in resp.tool_calls]},
             )
         )
 
@@ -266,6 +349,10 @@ def run_agent(
         result: dict[str, Any] = {}
         for call in resp.tool_calls:
             spec = TOOLS.get(call.name)
+            # ★ 默认 0：只在真正执行了工具的那条支线上才量时延。
+            #   幻觉工具名 / 参数不合法这两条支线【根本没执行工具】——
+            #   给它们记一个非零时延就是在 trace 里凭空造出一段不存在的耗时。
+            tool_ms = 0
 
             if spec is None:
                 # 模型幻觉出一个不存在的工具名 —— 这是常态，不是异常。
@@ -289,6 +376,7 @@ def run_agent(
                         "hint": "参数不合法 —— " + "；".join(problems) + "。请照此修正后重试。",
                     }
                 else:
+                    tool_t0 = time.monotonic()
                     try:
                         result = _call_tool(spec, parsed.model_dump())
                     except Exception as e:
@@ -303,6 +391,9 @@ def run_agent(
                             "error": "tool_crashed",
                             "hint": f"{type(e).__name__}: {e}",
                         }
+                    # ★ 时延在【成功与崩溃两种结局下都要量】：崩掉的那次往往才是最慢的
+                    #   （超时、卡死），漏掉它等于把最该看见的那一次从曲线里抹掉。
+                    tool_ms = _elapsed_ms(tool_t0)
             # ── 回灌：成功失败都要回 ──
             # 失败不回灌，模型就学不到任何东西，只会一遍遍重试同一个错 ——
             # 这是 ReAct 实现里最高频的 bug。
@@ -316,7 +407,21 @@ def run_agent(
                 }
             )
             records.append(
-                StepRecord(step=step, kind="tool", detail=call.name, ok=result.get("ok"))
+                StepRecord(
+                    step=step,
+                    kind="tool",
+                    detail=call.name,
+                    ok=result.get("ok"),
+                    # ★ error 取【代号】而不是 hint：hint 是给模型看的自然语言，
+                    #   措辞随时会改；代号（source_error / tool_timeout / …）
+                    #   才能拿来筛"所有超时的步"。见 StepRecord.error 的注释。
+                    #   result.get("error") 成功时不存在 → None → 归一成空串。
+                    error=str(result.get("error") or ""),
+                    latency_ms=tool_ms,
+                    ts=_now_iso(),
+                    # 参数摘要：回答"这两次点的是不是同一单"（死循环排查的抓手）。
+                    extra={"args_digest": _digest(call.arguments)},
+                )
             )
         # ── 终止条件 B：死循环检测 ──
         # 为什么 max_steps 不够：它只兜得住"步数爆炸"，兜不住"原地打转" ——

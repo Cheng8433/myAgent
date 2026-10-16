@@ -113,6 +113,17 @@ class LLMProvider(Protocol):
     （鸭子类型）——这样测试时塞一个假 Provider 极其方便。
     """
 
+    model: str
+    """这个 Provider 打的是哪个模型（如 "deepseek-chat"）。
+
+    ★ 为什么把它放进协议（M6 加的）：trace 每一行都要记 model。
+      没有它，同一份 trace 里混了两个模型（换供应商、A/B 对比、降级重试）
+      时，那批 token 是谁花的就再也分不清了 —— 而成本归因正是 M6 的目的。
+      它不是"实现细节"：调用方有权知道自己在跟谁说话。
+    （对照 M1 那条纪律：PROVIDER 不替上层决定超时 —— 反过来，
+      上层有权向 Provider 问它的身份。）
+    """
+
     def chat(
         self,
         messages: list[dict[str, Any]],

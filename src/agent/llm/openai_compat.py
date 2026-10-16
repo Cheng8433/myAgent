@@ -108,7 +108,9 @@ class OpenAICompatProvider:
             #   消息该给出【下一步做什么】，而不是 config 那句"配错了"。
             raise ConfigError("LLM_API_KEY 未设置或为空。请 cp .env.example .env 并填好。")
 
-        self._model = required_str("LLM_MODEL")
+        # ★ 公开属性而不是 self._model（M6 起）：它是 LLMProvider 协议的一部分
+        #   （trace 要拿它归因成本），私有名会让协议那条声明变成一句空话。
+        self.model = required_str("LLM_MODEL")
 
         self._client = OpenAI(
             base_url=required_str("LLM_BASE_URL"),
@@ -140,7 +142,7 @@ class OpenAICompatProvider:
         #   ② 语意更准：tools 为空时【压根不传这个键】，而不是传 None。
         #      有些供应商把 `tools: null` 和"没这个字段"当两回事。
         #   ③ 一行里塞三个结构（条件表达式 + dict 字面量 + 解包）不好读。
-        kwargs: dict[str, Any] = {"model": self._model, "messages": messages}
+        kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
         if tools:
             kwargs["tools"] = tools
 
