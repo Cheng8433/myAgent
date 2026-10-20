@@ -1,115 +1,154 @@
 # myAgent · 招聘信息日报 Agent
 
-自动登录学校招聘网 → 拉取招聘信息 → 生成日报 → 附带日志（异常时推送飞书）。
+自动抓取招聘信息、去重入库、生成 Markdown 日报，并附带日志与运行留痕；
+另提供基于本地岗位库的岗位匹配（规则 / 单次 LLM / Agent 循环三种模式）。
+主数据源为国家大学生就业服务平台（ncss.cn，学信网 CAS 登录），开发期可用
+remoteok.com 作为零登录替身。
 
-这是一个**学习型项目**：用真实可用的需求，把 Agent 工程的 8 项能力
-（选模型 / 写工具 / 做编排 / 管状态 / 加评估 / 做可观测 / 保安全 / 能部署）
-从「听说过」变成「写过、讲得清」。
+## 功能
 
-> **完整计划书见 [`docs/PLAN.md`](docs/PLAN.md)** —— 分 M0~M9 十个里程碑，
-> 每个里程碑都带「学什么 / 做什么 / 常见坑 / 自测题」。动手前请先读它。
+- **半自动登录**：Playwright 打开有头浏览器，由人工完成图形验证码；程序只保存
+  登录态（cookie），从不读取或保存账号密码。
+- **抓取与翻页**：按页拉取职位，直到空页为止；原始响应体按内容寻址存档。
+- **幂等入库**：SQLite 以 `(source, source_id)` 为主键做 upsert，重复抓取不产生重复行。
+- **日报生成**：调用 LLM 生成两三句摘要，渲染为 Markdown 表格并落盘。
+- **岗位匹配**：按求职档案在本地库检索、查看详情、排序并提交带分数与理由的清单；
+  支持纯规则、单次 LLM、ReAct Agent 三种模式，可做同池 A/B 对比。
+- **可观测**：结构化日志（业务 / LLM 分文件）、每次 run 的 JSONL trace、成本看板。
+- **护栏**：工具白名单真正拦截执行、网页内容隔离、出站日志脱敏、实名站点一天一次
+  且翻页间隔 ≥3 秒、登录失效即以退出码 3 停下等人工续期。
 
-## 技术路线
+## 技术栈
 
-| 项 | 选择 |
+| 层 | 选型 |
 |---|---|
-| 编排 | **手写 ReAct 循环**，不用 Agent 框架 |
-| LLM | 国内 OpenAI 兼容接口（DeepSeek / 通义等） |
-| 主靶子 | `ncss.cn` 国家大学生就业服务平台（学信网 CAS 登录） |
-| 开发期替身 | `remoteok.com/api`（零登录、零对抗，供 M1~M3 快速迭代） |
-| 登录 | **半自动**：人工过一次图形验证码 → 复用登录态 → 失效时告警 |
+| 语言 / 运行时 | Python 3.13 |
+| Agent 编排 | 手写 ReAct 循环（不依赖 Agent 框架） |
+| LLM | 任意 OpenAI 兼容接口（DeepSeek、通义千问等） |
+| HTTP | httpx（连接复用、显式超时） |
+| 数据校验 | Pydantic |
+| 存储 | SQLite（WAL） |
+| 日志 | structlog + 标准库 logging |
+| 登录 | Playwright（Chromium，有头模式） |
+| 测试 / 质量 | pytest、respx、ruff |
 
-## 当前状态
+## 项目结构
 
-- [x] 计划书 `docs/PLAN.md`
-- [x] 仓库地基：目录骨架、`.gitignore`、`.env.example`、`pyproject.toml`
-- [ ] M0 浏览器抓包补全站点档案（`docs/SITE.md` 大头都到手了：CAS 登录字段、职位接口路径与分页参数、响应结构、**登录态 cookie 实测快照** —— 业务会话是 `SESSION` @ `www.ncss.cn` `/student/`，`www.ncss.cn` 域共 13 条、CAS 域 8 条按域名排除；**还差两格**：`§4` `offset` 是页码还是行号 / `§5` **服务端**会话寿命 —— 后者有一不利线索：`SESSION` 是会话级 cookie（`expires=-1`），服务端超时未知，而同名的 `JSESSIONID`（CAS 域）正是 Tomcat 默认名、默认仅"30 分钟不活动"，需"今天登、明天跑"才能定）
-- [x] M1 LLM 裸调用 —— `scripts/m1_verify.py`
-- [x] M2a 工具层 · remoteok 替身 —— `scripts/m2_verify.py`
-- [ ] M2b 工具层 · ncss 真源 —— **Phase A + Phase B 代码均已落地，且已用真实登录态单页实证**：`python -m app.main login` 半自动登录 + 登录态落盘（`agent/tools/auth.py`）+ 登录过期接线（`status=login_expired` → 退出码 3）；`sources/ncss.py` 照 `docs/SITE.md` 实现解析与分页，`tests/test_ncss.py` 29 条离线断言（respx 假响应，**一次真实请求都不发**）。✅ **单页端到端已实测（2026-10-16）**：真实登录态 + 一次 GET → `flag=true`、10 条、raw 7425 字节（与档案分毫不差）。⚠️ **整份日报仍未真跑**：翻页节流（≥3s）属 M8，未实现前跑完整 flow 会背靠背拉页，违反本项目合规规则（详见 PLAN §M2 Phase B 对账第 6 条）
-- [x] M3 ReAct 主循环 —— `scripts/m3_verify.py`（第 8 项走真模型 + 真工具）
-- [x] M4a 编排加固：重试 / 超时 / 预算闸门 —— `scripts/m4_verify.py`
-- [x] M4b 确定性主流程：抓取 → 两阶段入库 → 摘要 → 渲染落盘 —— `scripts/m4b_verify.py`
-- [x] M5 状态管理：SQLite 建库 + 幂等写入 + 内容寻址存档 —— `scripts/m5_verify.py`
-- [x] M6 可观测：三层日志（`app.log` / `llm.log` / `var/traces/*.jsonl`）+ 成本看板 —— `scripts/m6_verify.py`
-- [x] M7 评估：三层（L1 `pytest` 回归网 · L2 离线回放 · L3 摘要性质断言）—— `pytest` + `python -m eval.run_eval`
-- [ ] M8 安全与护栏 —— ✅ **五条已落地（2026-10-20）**：① 工具白名单从"只影响说明书"变成**真正拦住执行**（`tool_not_allowed`，未授权工具不会被执行、也不会发请求）；② 网页内容隔离（`guardrails/untrusted.py`，正则中和闭合标签 + 8000 字符上限；`eval/injection.py` 三条跨层断言）；③ 出站脱敏补手机号 / 身份证 / 邮箱（13 位毫秒时间戳不误伤）；④ 翻页节流 ≥3s + 抖动（只对 ncss、只从第 2 页起）；⑤ 一天一次（东八区当天判，`login_expired` 不占额度，续期后可立刻重跑）。验收：`scripts/m8_verify.py` + `pytest` 156 条 + `eval.run_eval` 的 L2b。⏸ **飞书推送按主人决定暂缓**（在电脑上看结果即可）—— 告警目前由日志 + 结构化退出码承担，这是一笔明确的欠账（部署现状见下一行）。
-- [x] M9 部署与回滚 —— **（2026-10-20）**：① 单实例 `var/app.lock`（OS 级文件锁，进程死亡自动释放、无僵尸锁；撞锁退出码 4）；② 心跳 `var/heartbeat.json` + `python -m app.main status`（最近结局 / 今日额度 / 登录态年龄）；③ 退出码补齐 2 = 配置错误；④ Windows 任务计划程序：`scripts/run_report.cmd` 为唯一入口 + `register_task.ps1` / `unregister_task.ps1`（每天 08:00，`MultipleInstances=IgnoreNew`、错过后补跑）；⑤ 版本 `v0.9.0` + 回滚手册 `docs/DEPLOY.md`、决策 `docs/ADR/001-deploy-windows-task-scheduler.md`。验收：`scripts/m9_verify.py` + `pytest`。⏸ **外部告警（飞书）仍暂缓**；「无人值守连跑 3 天」需要真实时间，尚未验收。
+```
+myAgent/
+├─ docs/                   设计文档（PLAN / SITE / DEPLOY / ADR）
+├─ src/
+│  ├─ agent/
+│  │  ├─ llm/              LLM Provider 抽象与 OpenAI 兼容实现
+│  │  ├─ tools/            工具注册表、登录态、数据源（ncss / remoteok）
+│  │  ├─ runtime/          ReAct 循环、重试、预算闸门
+│  │  ├─ memory/           SQLite 连接、建表、状态读写
+│  │  ├─ observability/    日志、trace、成本看板、脱敏
+│  │  └─ guardrails/       限速、不可信内容隔离
+│  ├─ workflows/           日报主流程（抓取 → 入库 → 摘要 → 渲染）与岗位匹配
+│  └─ app/                 命令行入口、单实例锁、心跳
+├─ eval/                   评估用例与执行器（回放、注入防线、匹配 A/B）
+├─ profiles/               求职档案模板
+├─ tests/                  单元测试（离线，不发真实请求）
+├─ scripts/                各阶段验收脚本与 Windows 任务计划脚本
+└─ var/                    运行时数据（数据库、登录态、报告、清单、日志；已被 gitignore）
+```
 
-> **M4b 留下的两件事**：① 真链路只跑过一次手工验证，还没被任何脚本盯住 ——
-> `m4b_verify.py` 全程离线（假数据源 + 假 LLM），真实网络/模型的形状由
-> `python -m app.main report` 手工确认。② 摘要那一趟如果 LLM 直接抛错，
-> 会走 `_summarize` 里那条 `except LLMError` 降级（日报照出，只有摘要是占位符）；
-> 这一支的 token 用量仍然只能记 0（异常没带回来）—— 但 M6 起失败这件事本身有了留痕
-> （一条 `kind="subrun"` / `error="llm_error"` 的 StepRecord 落进 trace）。
-> **正常路径**的用量现在同时进 `runs` 两个列与 trace 的 llm 行。
+## 部署
 
-## 快速开始
+前提：Windows 11 / Git Bash、Python 3.13。
 
 ```bash
-# 1. 建虚拟环境（本机 python 与 Anaconda 的 pip 版本不一致，务必用项目内 venv 隔离）
+# 1. 虚拟环境（务必用项目内 venv 隔离系统 Python）
 python -m venv .venv
-source .venv/Scripts/activate      # Windows Git Bash
-# .venv\Scripts\activate.bat       # Windows CMD
+source .venv/Scripts/activate
 
 # 2. 安装依赖
 pip install -e ".[dev]"
 
-# 3. 配置（.env 不会被提交，可以放心填）
-#    ⚠️ 这一步是【必需】的：预算与超时都是必填配置（AGENT_* / LLM_TIMEOUT_SECONDS），
-#       代码里没有默认值 —— 没有 .env，程序在启动时当场报错，而不是悄悄用别的数。
+# 3. 配置（.env 不会被提交）
 cp .env.example .env
-#    然后编辑 .env，至少填上 LLM_API_KEY
+#    至少填写 LLM_API_KEY；LLM_* 与 AGENT_* 均为必填，代码中没有默认值
 
-# 4. 半自动登录（M2b 完成后可用；会弹出真实浏览器让你手动过验证码）
+# 4. 安装浏览器内核（仅登录需要）
+python -m playwright install chromium
+
+# 5. 半自动登录（弹出浏览器，人工过验证码）
 python -m app.main login
-
-# 5. 跑一次日报（在仓库根目录执行）
-python -m app.main report
 ```
 
-## ⚠️ Windows 中文编码（务必先看，否则会白踩坑）
+### 定时运行（Windows 任务计划程序）
 
-本机 Python 3.13 在 Windows 上**默认用 cp936(GBK)** 处理文本，而本项目通篇是中文
-（日报、日志、岗位标题）。不处理会出现两类症状：
+```powershell
+# 注册：每天 08:00 运行 scripts/run_report.cmd，错过后补跑
+powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1
 
-| 症状 | 原因 |
+# 取消
+powershell -ExecutionPolicy Bypass -File scripts\unregister_task.ps1
+```
+
+单实例由 `var/app.lock` 保证；`MultipleInstances=IgnoreNew` 防止任务叠加。
+详细运维与回滚见 `docs/DEPLOY.md`。
+
+### Windows 中文编码
+
+```bash
+export PYTHONUTF8=1
+```
+
+代码中所有文件读写均显式使用 `encoding="utf-8"`。
+
+## 使用
+
+```bash
+# 跑一次日报（抓取 → 入库 → 摘要 → 渲染）
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -m app.main report
+
+# 查看最近结局、今日额度、登录态年龄（只读）
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -m app.main status
+
+# 查看最近 N 天的成本与失败（只读）
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -m app.main board --days 7
+
+# 登录态过期后续期，然后立刻重跑
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -m app.main login
+
+# 岗位匹配（默认 Agent 模式；可选 workflow / single / ab）
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -m app.main match --profile profiles/example.json --mode agent
+```
+
+切换数据源：在 `.env` 中设置 `JOB_SOURCE=remoteok`（替身）或 `JOB_SOURCE=ncss`（主靶子）。
+
+### 输出位置
+
+| 内容 | 路径 |
 |---|---|
-| 控制台输出乱码 `���Ĳ���` | stdout 按 GBK 编码，终端按 UTF-8 解码 |
-| `UnicodeEncodeError: 'gbk' codec can't encode character` | `open()` 没指定 encoding，默认落到 GBK |
+| 日报 | `var/reports/YYYY-MM-DD.md` |
+| 业务日志 / LLM 日志 | `var/logs/app.log`、`var/logs/llm.log` |
+| 单次 run 留痕 | `var/traces/run-<run_id>.jsonl` |
+| 原始响应存档 | `var/raw/<sha1>.json` |
+| 数据库 | `var/app.db` |
+| 登录态 | `var/auth/ncss_state.json` |
+| 心跳 | `var/heartbeat.json` |
+| 匹配清单 | `var/shortlists/<run_id>.json`、最新一份 `latest.json` |
 
-**两条纪律：**
+### 退出码
 
-1. 每次开终端后设一次 UTF-8 模式（写进 shell 配置更省事）：
-   ```bash
-   export PYTHONUTF8=1        # Python 3.7+ 的 UTF-8 Mode，一劳永逸
-   ```
-2. 代码里**所有** `open()` 都显式写 `encoding="utf-8"`。
-   读网页、写日报、写 trace、写日志，一处都不能漏。
-   > 这不是洁癖：Windows 上 `open()` 不写 encoding 就等于赌运气，
-   > 而 M5 的日报落盘、M6 的 trace 写入全都涉及中文。
+| 码 | 含义 |
+|---|---|
+| 0 | 成功 / 无数据 / 今天已跑过 |
+| 1 | 抓取或流程失败（含首屏不可达） |
+| 2 | 配置错误 |
+| 3 | 登录态失效或尚未登录 |
+| 4 | 已有另一个实例在运行 |
 
-## 安全须知
+`match` 子命令沿用 0 / 1 / 2：没有候选、模型输出不合格、模型未提交清单都算
+「结果不好」而非「程序坏了」，退出码 0；运行环境失败为 1，档案或配置错误为 2。
 
-- `.env`、`var/auth/`（登录态）、`var/`（运行时数据）**均已被 `.gitignore` 挡住**。
-  提交前请习惯性 `git status` 自查。
-- ncss 背后是**实名学信网账号**，本项目**不做**任何反爬绕过：
-  不接打码平台、不逆向验证码、不伪造设备指纹。
-  登录由主人亲自完成，程序只保存登录态。
-- 抓取频率硬性限制为**一天一次**，翻页间隔 ≥3 秒。
-  出错即停手告警，不重试轰炸。
-- 推送默认关闭（`SEND_NOTIFY=false`），本地开发不会往外发消息。
+### 测试与离线验收
 
-## 目录结构
-
-```
-myAgent/
-├─ docs/PLAN.md        ← 计划书，先读它
-├─ docs/ADR/           ← 架构决策记录（每个决定写一条，面试素材）
-├─ src/agent/          ← Agent 内核：llm / tools / runtime / memory / observability / guardrails
-├─ src/workflows/      ← 确定性主流程（日报骨架）
-├─ src/app/            ← CLI 入口与定时调度
-├─ eval/               ← 评估用例与执行器
-├─ tests/              ← 单元测试
-└─ var/                ← 运行时数据（已被 gitignore）
+```bash
+./.venv/Scripts/python.exe -m pytest
+./.venv/Scripts/python.exe -m eval.run_eval
+./.venv/Scripts/python.exe scripts/m8_verify.py   # 其余 scripts/m*_verify.py 同理
 ```

@@ -1,0 +1,9 @@
+{
+  "headline": "Python 后端 / Agent 方向",
+  "titles": ["Python", "后端", "Agent", "算法"],
+  "skills": ["Python", "SQL", "LLM", "FastAPI"],
+  "cities": ["杭州", "上海"],
+  "exclude": ["销售", "外包"],
+  "seniority": "应届",
+  "notes": "可接受远程；更看重成长空间"
+}

@@ -1,17 +1,4 @@
-"""测试替身 —— 从 `scripts/m4b_verify.py` 【拷】过来的，不是 import。
-
-★ 为什么是拷贝（有意重复）而不是 `from scripts.m4b_verify import FakeLLM`：
-  ① `scripts/` 不是包、也不在 sys.path 上，import 它得先动 sys.path；
-  ② 更要命的是那类脚本【没有】 `if __name__ == "__main__"` 守卫
-     （2026-10-09 实测：m4_verify.py 全文没有这行）—— import 它 = 当场把
-     整个探针跑一遍并 SystemExit。它是"一跑到底"的脚本，不是可复用的模块。
-  两个消费者面向不同的问题：verify 脚本要"够真"（带叙述、一次性），
-  pytest 要"够快够细"（无副作用、按用例挑）。所以各自留一份，
-  改其中一份时记得另一份是【故意】不一样的。
-
-★ 判据：这里只放【跨多个测试文件】用得到的东西。只给一个文件用的，
-  留在那个文件里 —— 别让它变成"什么都往里塞"的杂物间。
-"""
+"""测试替身 —— 从 `scripts/m4b_verify.py` 【拷】过来的，不是 import。"""
 
 from __future__ import annotations
 
@@ -39,13 +26,7 @@ def job(
 
 
 class FakeLLM:
-    """假 Provider —— 三种脾气：正常答一句 / 永远点单 / 直接抛错。
-
-    ★ 它同样要遵守 Provider 契约第 3 条：回填真实 token 用量。
-      填 0 的话，"runs 的 token = 子 run 的累计"那条断言就永远成立得毫无意义。
-
-    ★ M6 起协议多了 `model`（trace 要拿它做成本归因），所以这里也得报一个。
-    """
+    """假 Provider —— 三种脾气：正常答一句 / 永远点单 / 直接抛错。"""
 
     model = "fake-model"
 
@@ -63,8 +44,6 @@ class FakeLLM:
         self.text = text
         self.error = error
         self.always_wants = always_wants
-        # ★ 默认仍点一个【不存在】的名字（理由见 chat 里那段）；
-        #   M8 的白名单用例要验证"存在但未授权"那条路，所以留一个注入口。
         self.tool_name = tool_name
         self.calls: list[list[dict]] = []
         self.seen_tools: list[object] = []
@@ -75,8 +54,6 @@ class FakeLLM:
         if self.error is not None:
             raise self.error
         if self.always_wants:
-            # ★ 刻意点一个【不存在】的工具名：loop 的 Act 分支是按全局 TOOLS
-            #   注册表查名字的（不是按传进去的 tool_names），点真名会真的发网络请求。
             return LLMResponse(
                 content=None,
                 tool_calls=[ToolCall(id="c1", name=self.tool_name, arguments="{}")],
@@ -91,6 +68,46 @@ class FakeLLM:
             completion_tokens=self.COMPLETION_TOKENS,
             finish_reason="stop",
         )
+
+
+class ScriptedLLM:
+    """按剧本依次返回预置响应；剧本用完就报错，而不是默默重播。"""
+
+    model = "scripted-model"
+
+    def __init__(self, *responses: LLMResponse) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[dict]] = []
+        self.seen_tools: list[object] = []
+
+    def chat(self, messages, tools=None):  # noqa: ANN001, ANN201 —— 假实现，形状对即可
+        self.calls.append([dict(m) for m in messages])
+        self.seen_tools.append(tools)
+        if not self._responses:
+            raise AssertionError("ScriptedLLM 的剧本用完了 —— 模型多要了一轮")
+        return self._responses.pop(0)
+
+
+def wants_tool(name: str, arguments: str = "{}", *, call_id: str = "c1") -> LLMResponse:
+    """一次「模型点名要调工具」的响应。"""
+    return LLMResponse(
+        content=None,
+        tool_calls=[ToolCall(id=call_id, name=name, arguments=arguments)],
+        prompt_tokens=100,
+        completion_tokens=10,
+        finish_reason="tool_calls",
+    )
+
+
+def says(text: str) -> LLMResponse:
+    """一次「模型直接给出文字」的响应。"""
+    return LLMResponse(
+        content=text,
+        tool_calls=[],
+        prompt_tokens=100,
+        completion_tokens=10,
+        finish_reason="stop",
+    )
 
 
 def wide_budget() -> Budget:

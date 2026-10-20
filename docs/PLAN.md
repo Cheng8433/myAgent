@@ -193,6 +193,7 @@ M1~M3 的快速迭代与评估 fixture 用它，因为它**零登录、零对抗
 | M7 | 评估 | 加评估 | `eval/`、指标报告 | `python -m eval.run_eval` 输出通过率与指标 |
 | M8 | 安全护栏 | 保安全 | `guardrails/`、`.env` 体系 | 日志/推送内容无明文敏感信息；注入测试不生效 |
 | M9 | 部署与回滚 | 能部署 | `app/schedule.py`、版本 tag | 无人值守连跑 3 天，失败可一键回滚 |
+| M10 | 岗位匹配 Agent + A/B | 做 Agent | `workflows/job_match.py`、`tools/job_search.py` | 三模式同池对比；`eval.run_eval` 的 L2c 全绿 |
 
 ---
 
@@ -1137,13 +1138,15 @@ LLM 输出不稳定，所以**不能断言字符串相等**。改为断言**可�
 > | ④ 网页内容隔离 | ✅ 补上闭合逃逸 | `guardrails/untrusted.py::wrap_untrusted()`：**正则**中和闭合标签的四种变体（大小写/空格），再截断 8000 字符。`eval/injection.py` 三条断言：闭合只出现一次、注入文字在区内、**照注入串点单 → `tool_not_allowed` 且零网络请求** |
 > | ⑤ 出站脱敏 | ✅ 扩了三条值形状规则 | 手机号 / 身份证 / 邮箱；`(?!\d)` 边界保证 13 位毫秒时间戳不被误剪；整数计数天然免疫（判据仍是类型）。脱敏仍在日志管线处理器上，调用点忘不掉 |
 > | ⑥ 外部写开关 + 频率上限 | ⏸ **飞书推送按主人决定暂缓** | `SEND_NOTIFY=false` 保持默认关闭；**这是一笔明确的欠账**，不是"已经做了" —— 告警当前由日志 + 结构化退出码承担 |
-> | ⑦ 限速与礼貌 | ✅ | `guardrails/ratelimit.py`：硬编码 `≥3s + uniform(0.5,2)`，只对 `POLITE_SOURCES={"ncss"}`、只从第 2 页起睡；`run_daily_report` 在任何抓取【之前】按东八区当天判"一天一次"（`ran_since`），`success/no_items/failed` 计入、`login_expired` 不计入（续期后要能立刻重跑）。`.env.example` 里那对从未被读取的 `HTTP_*_DELAY_SECONDS` 已删除 —— 可配的护栏不是护栏 |
+> | ⑦ 限速与礼貌 | ✅ | `guardrails/ratelimit.py`：硬编码 `≥3s + uniform(0.5,2)`，只对 `POLITE_SOURCES={"ncss"}`、只从第 2 页起睡；`run_daily_report` 在任何抓取【之前】按东八区当天判"一天一次"（`ran_since`），`success/no_items/failed` 计入、`login_expired` 不计入（续期后要能立刻重跑）。`.env.example` 里那对从未被读取的 `HTTP_*_DELAY_SECONDS` 已删除 —— 可配的护栏不是护栏。★ 2026-10-20 追加：`unreachable`（第一页 DNS/连接/TLS 握手失败、**零 HTTP 请求**）同样不计入 —— 判据是 `pages_done == 0`，抓过前几页再断网仍记 `failed`。这条是当天真跑撞出来的：一次 30 秒的握手超时把整天的额度吃掉了 |
 >
 > ★ robots.txt **实测（2026-10-20）**：`GET https://www.ncss.cn/robots.txt` 返回 HTTP 200，但正文是站点自己的 404 HTML（软 404）→ 没有 robots.txt、也没有显式禁止。我们仍执行自定的更严标准；运行期不抓取它。详见 `docs/SITE.md` §7。
 >
 > ★ 「出错即停、绝不重试轰炸」由既有机制承担：`fetch_all_pages` 遇 `SourceError` 立即上抛，`retry_call` 最多 3 次指数退避；`LoginExpired → 退出码 3` 停下等人工，**绝不自动重登**。
 >
-> ★ 验收：`scripts/m8_verify.py`（离线七节）+ `pytest` 156 条 + `python -m eval.run_eval` 的 L2b。
+> ★ **额度管的是「站点有没有被查询」，不是「代码有没有跑过」**：`SourceUnreachable`（`httpx.ConnectError` / `ConnectTimeout`，停在 DNS/连接/TLS 握手）单独成类，仍可重试，但首战不可达不占额度 —— 否则 08:00 一次网络抖动就能吃掉一整天。`ReadTimeout` 不算：请求已经发出去了。回归钉在 `tests/test_ncss.py`、`tests/test_ratelimit.py`、`tests/test_cli.py` 与 `scripts/m8_verify.py` ⑥。
+>
+> ★ 验收：`scripts/m8_verify.py`（离线七节）+ `pytest` 175 条 + `python -m eval.run_eval` 的 L2b。
 
 ### 自测题
 > 如果模型被注入后调用 `send_feishu` 把内部数据发到攻击者的 webhook，你的哪几层防御能拦住它？（提示：工具白名单不够，因为 send_feishu 在白名单里。答案要从「webhook 地址来自 env 而非参数」这个角度想。）
@@ -1211,6 +1214,70 @@ git checkout v0.2.0 && pip install -r requirements.txt   # 或 uv sync
 
 ### 自测题
 > 部署后连续两天没收到日报。你怎么区分「Agent 没跑」「跑了但没数据」「跑了但告警也挂了」这三种情况？
+
+---
+
+## M10 · 岗位匹配 Agent + A/B 对比
+
+### 学什么
+
+- **「Agent」到底长在哪**：不是"流程里调了一次 LLM"，而是模型自己决定检索什么、
+  看哪条详情、最后选谁 —— 工具调用是它的手脚，循环是它的思考过程。
+- **输出即动作**：Agent 的成败不能看它"说了什么"，要看它有没有真的调用工具把结果落盘。
+- **怎么诚实地比较**：确定性 / 单次 LLM / Agent 三条腿放在同一候选池、同一模型下比，
+  同时报质量与成本；样本小就只作定性演示。
+
+### 为什么另起一个场景
+
+生产主流程 `workflows/daily_report.py` 是确定性脚本，LLM 只做一次无工具摘要 ——
+这是 PLAN 原则一（流程确定、LLM 只做判断题）的直接结果。但这样一来，
+"工具调用、多轮决策"这些 Agent 的核心从未在生产路径上发生。M10 不改日报，
+而是用**岗位匹配**补一个真正需要探索与取舍的场景。
+
+### 做什么
+
+1. `tools/job_search.py`：`search_jobs` / `get_job` / `save_shortlist` 三个只读本地库的工具
+   （`save_shortlist` 是唯一写入口）。参数模型生成 JSON Schema，工具结果有界。
+2. `workflows/job_match.py`：同一份 `JobProfile` 下的三种模式 ——
+   `workflow`（SQL 预筛 + 关键词覆盖率，0 次 LLM）、`single`（一次 chat、无工具、输出 JSON）、
+   `agent`（`run_agent` + 三个工具，自行检索与提交）。
+3. 信任边界：`search_jobs` / `get_job` 标 `untrusted=True`，循环只在"工具真的执行并返回"后
+   把结果包进 `<untrusted_web_content>`；`save_shortlist` 只信 `source:source_id`，
+   title/url 一律回库回填。
+4. 成功判定：`latest.json` 的 `saved_at` 必须晚于本次 run 开始时刻 ——
+   上一次留下的清单不能冒充本次结果。每种模式另存 `var/shortlists/<run_id>.json`。
+5. **不写 `runs` 表**：`runs` 没有 source 列，写进去会被 `ran_since()` 误当作
+   ncss 当日额度已用掉，也会污染日报成本看板。
+
+### A/B 指标
+
+| 指标 | 回答什么 |
+|---|---|
+| precision@k / recall@k | 选得准不准（仅标注语料） |
+| schema 合法率 | 输出能不能被程序消费 |
+| LLM 调用 / 工具调用 | 多轮探索的代价 |
+| prompt + completion tokens | 真金白银 |
+| 墙钟毫秒 | 交互体验 |
+
+离线验收在 `eval/match_ab.py`（L2c，临时库 + 脚本化 LLM，零网络零花费）；
+真机实验是 `scripts/match_ab.py`（真实模型、默认每模式 3 轮，会花钱）。
+
+### 诚实边界
+
+- 12 条岗位是人工标注的小样本，`--repeat 3` 只够看趋势，不做统计显著性结论。
+- 真实库没有人工标注：那边只报成本与合法率，**不宣称 precision**。
+- `jobs` 表只有结构化字段，`get_job` 给的是 extras（薪资/学历/标签），不是 JD 全文；
+  接详情页会引入抓取频率问题，本轮明确不做。
+- 真实库上 Agent 能全库检索，另两种只能看预筛池；标注语料用"库 = 池"规避这一点。
+- 日报仍然是确定性流程 —— M10 是补课，不是把生产主流程改成 ReAct。
+
+### 验收
+
+```bash
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -m pytest
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -m eval.run_eval          # L2c 应全绿
+PYTHONUTF8=1 ./.venv/Scripts/python.exe -m app.main match --profile profiles/example.json --mode ab
+```
 
 ---
 
