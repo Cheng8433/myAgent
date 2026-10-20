@@ -58,10 +58,14 @@ class FakeLLM:
         text: str = "今天这批岗位集中在后端与数据方向。",
         error: Exception | None = None,
         always_wants: bool = False,
+        tool_name: str = "no_such_tool",
     ) -> None:
         self.text = text
         self.error = error
         self.always_wants = always_wants
+        # ★ 默认仍点一个【不存在】的名字（理由见 chat 里那段）；
+        #   M8 的白名单用例要验证"存在但未授权"那条路，所以留一个注入口。
+        self.tool_name = tool_name
         self.calls: list[list[dict]] = []
         self.seen_tools: list[object] = []
 
@@ -75,7 +79,7 @@ class FakeLLM:
             #   注册表查名字的（不是按传进去的 tool_names），点真名会真的发网络请求。
             return LLMResponse(
                 content=None,
-                tool_calls=[ToolCall(id="c1", name="no_such_tool", arguments="{}")],
+                tool_calls=[ToolCall(id="c1", name=self.tool_name, arguments="{}")],
                 prompt_tokens=self.PROMPT_TOKENS,
                 completion_tokens=self.COMPLETION_TOKENS,
                 finish_reason="tool_calls",

@@ -126,15 +126,27 @@ class RoundScript:
         )
 
 
-def run_with(llm: RoundScript, budget: Budget, *, clock: FakeClock | None = None):
-    """跑一次 run_agent，必要时用假时钟顶掉 time.monotonic。"""
+def run_with(
+    llm: RoundScript,
+    budget: Budget,
+    *,
+    clock: FakeClock | None = None,
+    tool_names: tuple[str, ...] = ("fetch_job_list",),
+):
+    """跑一次 run_agent，必要时用假时钟顶掉 time.monotonic。
+
+    ★ M8 起 tool_names 是【执行权限】而不只是广告单：未列出的工具会被
+      `tool_not_allowed` 拦下。所以凡是真想让它跑到的假工具，这里必须点名。
+      （本脚本 ①~④ 用不存在的 `probe_tool` 只走预算闸门，不需要授权；
+       工具超时那一节要真的执行 `fake_slow`，那一处显式传自己的白名单。）
+    """
     if clock is None:
         return run_agent(
-            "测试任务", llm, run_id=new_run_id(), tool_names=["fetch_job_list"], budget=budget
+            "测试任务", llm, run_id=new_run_id(), tool_names=list(tool_names), budget=budget
         )
     with patch("time.monotonic", new=clock):
         return run_agent(
-            "测试任务", llm, run_id=new_run_id(), tool_names=["fetch_job_list"], budget=budget
+            "测试任务", llm, run_id=new_run_id(), tool_names=list(tool_names), budget=budget
         )
 
 
@@ -306,7 +318,11 @@ def fake_slow(seconds: float = 5.0) -> dict:
 
 llm = Scripted([wants("fake_slow", '{"seconds": 0.6}'), says()])
 t0 = time.monotonic()
-res = run_with(llm, Budget(max_steps=4, max_tokens=10**9, max_wall_seconds=10**9))
+res = run_with(
+    llm,
+    Budget(max_steps=4, max_tokens=10**9, max_wall_seconds=10**9),
+    tool_names=("fake_slow",),
+)
 elapsed = time.monotonic() - t0
 
 # ★ 这条断言是【抓 `with ThreadPoolExecutor(...)` 那个坑】的：

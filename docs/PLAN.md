@@ -1127,6 +1127,24 @@ LLM 输出不稳定，所以**不能断言字符串相等**。改为断言**可�
    - 出错超过阈值立刻停手并告警，**绝不重试轰炸**
    - 遵守 `robots.txt`；登录态失效时**停下等人工**，不尝试自动重登
 
+> **M8 对账（2026-10-20）—— 七条里五条落地，一条明确暂缓，一条本来就是现状**
+>
+> | 规则 | 状态 | 落点 / 说明 |
+> |---|---|---|
+> | ① 凭据只从 env 读 | ✅ 既有 | `.env` 被 `.gitignore` 挡住；ncss 登录态走 `var/auth/`（结构上没有账号密码字段） |
+> | ② 最小权限 / 工具白名单 | ✅ **本轮修掉一个真洞** | 原先 `loop.py` 的 Act 阶段用【全局注册表】`TOOLS.get(name)` 解析，`tool_names` 只影响"发给模型的说明书" —— 注册了就能调。现在 `allowed = set(tool_names)` 是执行权限；新增 `tool_not_allowed` 分支，次序是 `unknown_tool → tool_not_allowed → invalid_args → 执行`。两条 hint 都只列 `sorted(allowed)`。证据：`tests/test_loop.py`、`scripts/m8_verify.py` ① |
+> | ③ SQL 参数化 | ✅ 新增一处也守住了 | `memory/store.ran_since()` 的 SQL 由代码构造、值全占位，并用 `datetime()` 归一化比较 |
+> | ④ 网页内容隔离 | ✅ 补上闭合逃逸 | `guardrails/untrusted.py::wrap_untrusted()`：**正则**中和闭合标签的四种变体（大小写/空格），再截断 8000 字符。`eval/injection.py` 三条断言：闭合只出现一次、注入文字在区内、**照注入串点单 → `tool_not_allowed` 且零网络请求** |
+> | ⑤ 出站脱敏 | ✅ 扩了三条值形状规则 | 手机号 / 身份证 / 邮箱；`(?!\d)` 边界保证 13 位毫秒时间戳不被误剪；整数计数天然免疫（判据仍是类型）。脱敏仍在日志管线处理器上，调用点忘不掉 |
+> | ⑥ 外部写开关 + 频率上限 | ⏸ **飞书推送按主人决定暂缓** | `SEND_NOTIFY=false` 保持默认关闭；**这是一笔明确的欠账**，不是"已经做了" —— 告警当前由日志 + 结构化退出码承担 |
+> | ⑦ 限速与礼貌 | ✅ | `guardrails/ratelimit.py`：硬编码 `≥3s + uniform(0.5,2)`，只对 `POLITE_SOURCES={"ncss"}`、只从第 2 页起睡；`run_daily_report` 在任何抓取【之前】按东八区当天判"一天一次"（`ran_since`），`success/no_items/failed` 计入、`login_expired` 不计入（续期后要能立刻重跑）。`.env.example` 里那对从未被读取的 `HTTP_*_DELAY_SECONDS` 已删除 —— 可配的护栏不是护栏 |
+>
+> ★ robots.txt **实测（2026-10-20）**：`GET https://www.ncss.cn/robots.txt` 返回 HTTP 200，但正文是站点自己的 404 HTML（软 404）→ 没有 robots.txt、也没有显式禁止。我们仍执行自定的更严标准；运行期不抓取它。详见 `docs/SITE.md` §7。
+>
+> ★ 「出错即停、绝不重试轰炸」由既有机制承担：`fetch_all_pages` 遇 `SourceError` 立即上抛，`retry_call` 最多 3 次指数退避；`LoginExpired → 退出码 3` 停下等人工，**绝不自动重登**。
+>
+> ★ 验收：`scripts/m8_verify.py`（离线七节）+ `pytest` 156 条 + `python -m eval.run_eval` 的 L2b。
+
 ### 自测题
 > 如果模型被注入后调用 `send_feishu` 把内部数据发到攻击者的 webhook，你的哪几层防御能拦住它？（提示：工具白名单不够，因为 send_feishu 在白名单里。答案要从「webhook 地址来自 env 而非参数」这个角度想。）
 

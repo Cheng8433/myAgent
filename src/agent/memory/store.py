@@ -197,6 +197,42 @@ def store_page(
     return upsert_jobs(conn, page.jobs, raw_path=raw_path, run_id=run_id)
 
 
+def ran_since(
+    conn: sqlite3.Connection,
+    *,
+    since: str,
+    statuses: Sequence[str],
+) -> bool:
+    """`since` 之后有没有过这几种 status 的 run？—— "一天一次"的判据。
+
+    ★ 为什么这个函数住在 memory/ 而不是 workflows/：
+      它只认识 runs 表（SQL + 参数），不认识"日报"、不认识 ncss。
+      把它放进编排层，等于让"一天一次"这条策略和数据访问粘在一起，
+      将来想用别的条件查 runs 就得再写一遍 SQL。分层判据：
+      这里回答"库里有没有"，编排层回答"要不要因此跳过"。
+
+    ★ `datetime()` 两边都包：runs.started_at 是 ISO8601（带 +00:00），
+      而 since 也按 ISO 传进来。SQLite 的字符串比较在"日期格式不同"时
+      会悄悄错一格 —— 用 datetime() 归一化成同一种形状再比，
+      边界（正好 00:00:00）才不会因为多一个 'T' 或少一个时区后缀而判错。
+      （M6 在日期比较上踩过同一条坑。）
+
+    ★ SQL 由代码构造、值全走占位符（PLAN §M8 第 3 条）：
+      statuses 的【个数】决定占位符个数，但每一个值仍然绑定在 `?` 上。
+      直接拼 status 字符串会把"调用方传进来的词表"变成 SQL 的一部分，
+      而这个函数的调用方是代码、也不是模型 —— 纪律仍然一样：
+      **能参数化就参数化，别给下一个改动留一个可以偷懒的形状。**
+    """
+    placeholders = ", ".join(["?"] * len(statuses))
+    sql = (
+        "SELECT 1 FROM runs "
+        "WHERE datetime(started_at) >= datetime(?) "
+        f"AND status IN ({placeholders}) "
+        "LIMIT 1"
+    )
+    return conn.execute(sql, (since, *statuses)).fetchone() is not None
+
+
 def record_run(
     conn: sqlite3.Connection,
     *,

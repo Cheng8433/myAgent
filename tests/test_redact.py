@@ -53,6 +53,38 @@ def test_nested_dict_masked():
     }
 
 
+def test_phone_masked_by_value_shape():
+    assert redact("联系方式 13812345678") == "联系方式 ***"
+
+
+def test_email_masked_by_value_shape():
+    assert redact({"note": "发到 alice@example.com"}) == {"note": "发到 ***"}
+
+
+def test_id_card_masked_by_value_shape():
+    assert redact("身份证 110101199003077777") == "身份证 ***"
+
+
+def test_epoch_millis_is_not_a_phone_number():
+    """★ 这条比三条新规则本身更重要：13 位毫秒时间戳前 11 位形似手机号。
+
+    没有 `(?!\\d)`，每一条带 epoch 的日志都会被剪掉一截，而且不报错 ——
+    ncss 的 `publishDate` 就是这种整数。
+    """
+    assert redact({"ts": "1792149378213"}) == {"ts": "1792149378213"}
+    assert redact("_=1792149378213") == "_=1792149378213"
+
+
+def test_non_string_values_are_never_masked():
+    """凭据/身份在 JSON 里是字符串；数字是计数或时间。判据仍然是类型。"""
+    assert redact({"phone": 13812345678}) == {"phone": 13812345678}
+
+
+def test_plain_long_number_untouched():
+    """18 位但不是身份证形状（生日段不合法）→ 不动。"""
+    assert redact("订单号 123456789012345678") == "订单号 123456789012345678"
+
+
 def test_plain_values_untouched():
     assert redact({"role": "user", "n": 1, "ok": True, "nothing": None}) == {
         "role": "user",

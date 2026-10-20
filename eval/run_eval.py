@@ -79,7 +79,7 @@ def main() -> int:
     #   respx，而 respx 在 pytest 启动【之前】就进 sys.modules 的话，pytest 的
     #   断言重写就没法给它打补丁（PytestAssertRewriteWarning）。晚一步 import
     #   就没这条噪音 —— 同 app/main.py 那句"每个子命令只付自己的启动成本"。
-    from eval import replay
+    from eval import injection, replay
 
     l2 = replay.run_replay()
     l2_failed = _report_checks(l2)
@@ -88,12 +88,19 @@ def main() -> int:
         "  (fixture: remoteok_sample)"
     )
 
+    # ── L2b：注入防线（离线） ──
+    # ★ 单立一节而不是塞进 L2：它验的不是"日报流程对不对"，而是
+    #   "网页数据能不能越界变成指令" —— 两条问题，各有一个计数。
+    l2b = injection.run_injection_checks()
+    l2b_failed = _report_checks(l2b)
+    print(f"=== L2b 注入防线（离线）=== {len(l2b) - l2b_failed} passed / {l2b_failed} failed")
+
     model = os.getenv("LLM_MODEL", "?")
     if not os.getenv("LLM_API_KEY"):
         print("=== L3 语义评估 === SKIPPED —— 未设 LLM_API_KEY，本次【未验证】模型输出")
         print("=== Token 成本 === 本次评估消耗 0 tokens（L3 未运行）")
         # ★ 即便 L1/L2 全绿，也返回 2：跳过不是通过。
-        return EXIT_SKIPPED if not (failed or l2_failed) else EXIT_FAIL
+        return EXIT_SKIPPED if not (failed or l2_failed or l2b_failed) else EXIT_FAIL
 
     # ── L3：语义评估（真模型） ──
     from agent.llm.openai_compat import OpenAICompatProvider
@@ -106,7 +113,7 @@ def main() -> int:
     l3_failed = _report_checks(checks)
     print(f"=== Token 成本 === {semantic.cost_line(model, prompt_tokens, completion_tokens)}")
 
-    return EXIT_FAIL if (failed or l2_failed or l3_failed) else EXIT_OK
+    return EXIT_FAIL if (failed or l2_failed or l2b_failed or l3_failed) else EXIT_OK
 
 
 if __name__ == "__main__":

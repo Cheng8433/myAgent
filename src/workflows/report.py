@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from agent.memory.store import var_dir
@@ -65,6 +65,28 @@ def report_day(*, now: datetime | None = None) -> str:
         # 得到差一天的文件名，而且不报错。
         moment = moment.replace(tzinfo=CN_TZ)
     return moment.astimezone(CN_TZ).strftime("%Y-%m-%d")
+
+
+def day_start_utc(*, now: datetime | None = None) -> str:
+    """东八区"今天 00:00"换算成 UTC ISO8601 —— "一天一次"的时间边界。
+
+    ★ 为什么不直接用 `report_day()` 的字符串去比：
+      那是"哪一天"的标签，这里是【一个时刻】。拿标签比时间会让 SQL
+      在类型上含糊（'2026-10-20' vs '2026-10-20T...'），而 SQLite
+      对字符串比较的宽容恰好会让这种含糊"看起来能跑"。
+      一个事实一个出处：`CN_TZ` 同时定义这两件事，但它们各取所需。
+
+    ★ 为什么"一天"按东八区算，而不是 UTC：
+      runs.started_at 是 UTC，但主人的"今天"是 +08:00。用 UTC 零点评判，
+      每天早上 08:00 之前跑的那一次会被算进【前一天】—— 于是日报的
+      "今天"和限额的"今天"差 8 小时，而两边都不报错。
+    """
+    moment = now if now is not None else datetime.now(CN_TZ)
+    if moment.tzinfo is None:
+        # 同 report_day：裸 datetime 一律当东八区解释，不按本机时区猜。
+        moment = moment.replace(tzinfo=CN_TZ)
+    local_midnight = moment.astimezone(CN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(UTC).isoformat()
 
 
 def report_path(day: str, *, root: str | Path | None = None) -> Path:

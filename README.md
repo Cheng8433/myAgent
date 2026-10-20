@@ -33,7 +33,7 @@
 - [x] M5 状态管理：SQLite 建库 + 幂等写入 + 内容寻址存档 —— `scripts/m5_verify.py`
 - [x] M6 可观测：三层日志（`app.log` / `llm.log` / `var/traces/*.jsonl`）+ 成本看板 —— `scripts/m6_verify.py`
 - [x] M7 评估：三层（L1 `pytest` 回归网 · L2 离线回放 · L3 摘要性质断言）—— `pytest` + `python -m eval.run_eval`
-- [ ] M8 安全与推送 · M9 部署
+- [ ] M8 安全与护栏 —— ✅ **五条已落地（2026-10-20）**：① 工具白名单从"只影响说明书"变成**真正拦住执行**（`tool_not_allowed`，未授权工具不会被执行、也不会发请求）；② 网页内容隔离（`guardrails/untrusted.py`，正则中和闭合标签 + 8000 字符上限；`eval/injection.py` 三条跨层断言）；③ 出站脱敏补手机号 / 身份证 / 邮箱（13 位毫秒时间戳不误伤）；④ 翻页节流 ≥3s + 抖动（只对 ncss、只从第 2 页起）；⑤ 一天一次（东八区当天判，`login_expired` 不占额度，续期后可立刻重跑）。验收：`scripts/m8_verify.py` + `pytest` 156 条 + `eval.run_eval` 的 L2b。⏸ **飞书推送按主人决定暂缓**（在电脑上看结果即可）—— 告警目前由日志 + 结构化退出码承担，这是一笔明确的欠账。**M9 部署**仍未开始。
 
 > **M4b 留下的两件事**：① 真链路只跑过一次手工验证，还没被任何脚本盯住 ——
 > `m4b_verify.py` 全程离线（假数据源 + 假 LLM），真实网络/模型的形状由

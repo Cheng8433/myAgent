@@ -117,6 +117,7 @@ def _report_outcome(report: DailyReport) -> int:
     """
     from agent.tools.auth import LOGIN_HINT
     from workflows.daily_report import (
+        STATUS_ALREADY_RAN,
         STATUS_FAILED,
         STATUS_LOGIN_EXPIRED,
         STATUS_NO_ITEMS,
@@ -134,6 +135,11 @@ def _report_outcome(report: DailyReport) -> int:
         return EXIT_FAILED
     elif report.status == STATUS_NO_ITEMS:
         print("日报运行成功，但未抓取到任何岗位信息")
+        return EXIT_OK
+    elif report.status == STATUS_ALREADY_RAN:
+        # ★ 退出码 0：对 cron 来说"今天已经跑过"是【正常结局】，不是错误。
+        #   但必须打出来 —— 否则定时任务只看到一个 0，会以为今天出了新报告。
+        print(f"本次未抓取：{report.detail}。")
         return EXIT_OK
     elif report.status == STATUS_LOGIN_EXPIRED:
         # ★ 刻意【不】只打一句"失败"：这条消息是给人看的下一步指令。

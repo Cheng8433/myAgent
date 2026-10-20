@@ -94,6 +94,48 @@ def test_unknown_tool_fed_back_without_crashing():
     assert tool_recs[0].ok is False
 
 
+def test_registered_but_not_allowed_is_blocked(monkeypatch):
+    """★ M8：`tool_names` 同时是【执行权限】，不再只是"发给模型的说明书"。
+
+    这一条只能靠"探针有没有被真的调用"来验 —— 光看回灌了 tool_not_allowed
+    还不够：那个分支写完却忘了把执行挪进 else，回灌照样是对的。
+    """
+    from pydantic import BaseModel
+
+    from agent.tools.registry import TOOLS, ToolSpec
+
+    class _NoArgs(BaseModel):
+        pass
+
+    executed: list[str] = []
+
+    def probe_tool() -> dict:
+        """只为本用例存在的探针工具；它一旦被执行，列表里就会多一条。"""
+        executed.append("probe_tool")
+        return {"ok": True}
+
+    monkeypatch.setitem(TOOLS, "probe_tool", ToolSpec(probe_tool, _NoArgs))
+    llm = FakeLLM(always_wants=True, tool_name="probe_tool")
+
+    res = run_agent(
+        "t",
+        llm,
+        run_id="r",
+        tool_names=[],  # 注册表里有，但这次 run 没有授权
+        budget=wide_budget(),
+        repeat_limit=2,
+    )
+
+    tool_recs = [r for r in res.steps if r.kind == "tool"]
+    assert tool_recs[0].error == "tool_not_allowed"
+    assert tool_recs[0].ok is False
+    assert executed == [], "未授权的工具绝不能被执行 —— 这就是白名单与广告的区别"
+
+    # 可用清单只列【这次能用的】：列一个不能调的工具等于指错路。
+    fed = [m for m in llm.calls[1] if m.get("role") == "tool"][0]
+    assert "可用工具：[]" in fed["content"]
+
+
 def test_status_vocabulary_is_closed():
     """循环的 status 是一个封闭词表 —— 改这里就等于改对外契约。"""
     seen = set()
