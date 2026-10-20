@@ -20,7 +20,8 @@
 ```bash
 # ① 先手动跑一次 —— 不通过就别注册任务
 PYTHONUTF8=1 ./.venv/Scripts/python.exe -m app.main report
-#    退出码 0 = 成功 / 已跑过；3 = 登录过期；1 = 抓取或流程失败；2 = 配置错误
+#    退出码 0 = 成功 / 已跑过；3 = 登录过期；1 = 抓取或流程失败（含首次不可达）；
+#    2 = 配置错误
 
 # ② 看结局
 PYTHONUTF8=1 ./.venv/Scripts/python.exe -m app.main status
@@ -52,10 +53,15 @@ schtasks /Run /TN "myAgent Daily Report"
 | 码 | 含义 | 该做什么 |
 |---|---|---|
 | 0 | 成功 / 无数据 / 今天已跑过 | 无 |
-| 1 | 抓取或流程失败 | 看 `app.log` 与 `task.log` |
+| 1 | 抓取或流程失败；或首次连接不可达 | 看 `app.log` 与 `task.log` |
 | 2 | 配置错误（缺变量 / 空串 / 类型错） | 改 `.env` |
 | 3 | 登录态失效或还没登录 | `python -m app.main login` 后立刻重跑 |
 | 4 | 已有另一个实例在跑 | 等它结束；不要重试叠加 |
+
+> **`unreachable`（退出码 1 的一个特例）**：第一页就在 DNS / 连接 / TLS 握手阶段失败，
+> **一个 HTTP 请求都没发出去**。`status` 会显示 `status=unreachable`，并明确说
+> 「不占今日额度」—— 网络恢复后**直接重跑**即可，不必等到明天。
+> 判据是 `pages_done == 0`：已经抓过前几页再断网，仍按 `failed` 计、仍占额度。
 
 ## 4. 单实例与并发
 
