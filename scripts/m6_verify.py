@@ -1,26 +1,4 @@
-"""M6 验收台 —— 可观测层：trace 落盘 / 步骤新列 / 老库迁移 / 脱敏 / 看板。
-
-用法：PYTHONUTF8=1 ./.venv/Scripts/python.exe scripts/m6_verify.py
-
-★ 为什么全程离线、全用临时目录：
-  M6 三块东西有一个共同的坏脾气 ——【平时看不见】。trace 是写文件、
-  脱敏是改字符串、迁移只在"老库"上才发生。这三件事都不会在"跑通了"的
-  那一刻报错：trace 少一个字段、脱敏多盖一个数字、迁移没补上列，
-  全都是【静默】的。所以这一台不验"跑得通"，只验"形状对不对"，
-  而且全在系统临时目录里做：不碰主人的 var/app.db（那里面有真实数据），
-  跑完自动清。
-
-★ 每一节钉的都是「只有理解了才写得对」的那一条，不是"没抛异常"：
-  ① 钉的是 ts 由【产生留痕的那一层】打 —— 批量落盘不许把整批抹成同一刻；
-  ② 钉的是"进库的"和"只进 trace 的"这两类字段的分界（能用 SQL 聚合吗）；
-  ③ 钉的是 `CREATE TABLE IF NOT EXISTS` 补不了列 —— 那正是迁移存在的理由；
-  ④ 钉的是 prompt_tokens / completion_tokens 这类【计数】不许被当成凭据盖掉
-     （这颗雷是 2026-10-09 实测抓到的：键名含子串 "token" 被误伤成 "***"）；
-  ⑤ 钉的是日期比较要过 datetime() 归一化 —— 直接比字符串会在边界悄悄错一格。
-
-模块位置：src/agent/observability/{trace,logs,board}.py、
-         src/agent/memory/{db,store}.py、src/agent/runtime/loop.py 的 StepRecord
-"""
+"""M6 验收台 —— 可观测层：trace 落盘 / 步骤新列 / 老库迁移 / 脱敏 / 看板。"""
 
 from __future__ import annotations
 
@@ -100,9 +78,6 @@ def main() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmp_path = Path(tmp)
 
-        # ══════════════════════════════════════════════════════════
-        #  ① trace：一次 run 一个文件、一行一条、按发生顺序
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ① trace：一次 run 一个文件、一行一条 ═══")
         t_root = tmp_path / "t"
         t_root.mkdir()
@@ -180,11 +155,9 @@ def main() -> None:
         )
         check("error 有值才写", lines[2]["error"], "llm_error")
 
-        # ts 留空 → 退回落盘时刻（不抛）
         write_trace(rid, [StepRecord(step=0, kind="llm", detail="stop")], root=t_root)
         check("ts 留空时退回落盘时刻（不抛）", bool(_read_trace(t_root, rel)[0]["ts"]), True)
 
-        # 覆盖写，不是追加
         write_trace(rid, records, root=t_root)
         write_trace(rid, records[:1], root=t_root)
         check(
@@ -194,7 +167,6 @@ def main() -> None:
             "追加的话这里会是 4，读起来像「这个 run 跑了两趟」",
         )
 
-        # 一次 run 一个文件
         write_trace(new_run_id(), records, root=t_root)
         check(
             "多次 run → 多个文件（不混在一起）",
@@ -202,7 +174,6 @@ def main() -> None:
             2,
         )
 
-        # 键冲突护栏：extra 里混进固定列的名字
         check(
             "★ extra 塞了保留键 → 当场炸",
             _raises(
@@ -214,9 +185,6 @@ def main() -> None:
             "静默覆盖会把真正的 step 顶掉，而 trace 看上去还挺正常 —— 这是 m4b 真拦下过的雷",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ② steps 的两列：进库的是"能用 SQL 聚合的"，其余只进 trace
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ② steps 新列：进库的 vs 只进 trace 的 ═══")
         conn = connect(tmp_path / "s" / "app.db")
         ensure_schema(conn)
@@ -293,9 +261,6 @@ def main() -> None:
             "铺成列的话，一半的列对任何一行都是 NULL —— 那正是「声明了但没人消费」",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ③ 迁移：老库的 steps 少两列
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ③ 迁移：给【已存在】的表补列 ═══")
         check(
             "迁移与建表说的是一套话",
@@ -306,8 +271,6 @@ def main() -> None:
 
         m_conn = connect(tmp_path / "m" / "app.db")
         ensure_schema(m_conn)
-        # 造一个"老库"：把 M6 新加的两列删掉，回到 M5 的形状。
-        # （用 DROP COLUMN 而不是手写一份旧 SCHEMA —— 手写的副本迟早会跟真的走散。）
         m_conn.execute("ALTER TABLE steps DROP COLUMN latency_ms")
         m_conn.execute("ALTER TABLE steps DROP COLUMN error")
         check(
@@ -353,9 +316,6 @@ def main() -> None:
         check("ensure_schema 幂等", _raises(lambda: ensure_schema(m_conn)), "没抛")
         m_conn.close()
 
-        # ══════════════════════════════════════════════════════════
-        #  ④ 看板：聚合，以及那个"别拿字符串比日期"的坑
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ④ 看板：聚合与日期窗口 ═══")
         b_conn = connect(tmp_path / "b" / "app.db")
         ensure_schema(b_conn)
@@ -371,7 +331,7 @@ def main() -> None:
 
         add_run("today", 0, "success", 100, 20)
         add_run("six_days", 6, "failed", 40, 10, err="SourceError: HTTP 403")
-        add_run("ten_days", 10, "success", 900, 99)  # 应被 7 天窗口排除
+        add_run("ten_days", 10, "success", 900, 99)
         b_conn.commit()
 
         daily = cost_summary(b_conn, days=7)
@@ -410,9 +370,6 @@ def main() -> None:
         )
         b_conn.close()
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑤ 脱敏：计数不许被当成凭据（实测抓到的雷）
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑤ 脱敏：计数 vs 凭据 ═══")
         check(
             "★ token 计数保住（键名含 token 但值是数字）",
@@ -439,9 +396,6 @@ def main() -> None:
             "llm.log 里 messages 是个大 dict —— 只盖顶层等于没盖",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑥ 日志分层：两个文件，且不互相掺
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑥ 日志分层：app.log 与 llm.log ═══")
         l_root = tmp_path / "l"
         l_root.mkdir()
@@ -460,13 +414,8 @@ def main() -> None:
         try:
             LoggedProvider(_Fake(boom=True)).chat([{"role": "user", "content": "hi"}])
         except LLMTransientError:
-            pass  # 日志层【不吞】异常，原样抛回 —— 这里接住只为了继续验
+            pass
 
-        # 冒充第三方库：httpx 在每次请求后打的 INFO（GET / POST 都是它）。
-        # 它会顺着 root 冒进来 —— 但它不是我们从 "agent" 树发的，
-        # app.log 的白名单 filter 该把它挡在门外（见 logs._is_our_logger）。
-        # 同时挂个临时 handler 到 root，证明"记录确实发出了、是 filter 挡的"，
-        # 而不是"根本没打出来"（否则这条断言就是假绿）。
         seen: list[str] = []
 
         class _Probe(logging.Handler):
@@ -479,7 +428,7 @@ def main() -> None:
         logging.getLogger("httpx").info('HTTP Request: GET https://example.com "HTTP/1.1 200 OK"')
         root_logger.removeHandler(probe)
 
-        shutdown_logging()  # 关句柄，否则 Windows 上临时目录删不掉
+        shutdown_logging()
 
         app_txt = (var_dir(l_root) / "logs" / "app.log").read_text(encoding="utf-8")
         llm_txt = (var_dir(l_root) / "logs" / "llm.log").read_text(encoding="utf-8")

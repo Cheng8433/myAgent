@@ -1,9 +1,4 @@
-"""状态层单测 —— 幂等写入、内容寻址存档、主键的两列。
-
-★ 这一组盯的是 M5 的核心承诺：**同一个写入被执行多次是常态**（M4a 给
-  write 类工具开了 3 次重试），所以"跑 1 遍和跑 10 遍结果相同"必须被钉死。
-  验证方式是"跑两遍、断言第二遍 inserted=0"，而不是"读代码看着像幂等"。
-"""
+"""状态层单测 —— 幂等写入、内容寻址存档、主键的两列。"""
 
 from __future__ import annotations
 
@@ -73,8 +68,8 @@ def test_archive_raw_distinct_content_distinct_files(tmp_path):
 def test_archive_raw_returns_relative_posix_path(tmp_path):
     """库里存的是"逻辑路径"：相对 var/、正斜杠 —— 换台机器也读得出来。"""
     rel = archive_raw(b"x", root=tmp_path)
-    assert "\\" not in rel  # Windows 的反斜杠不许漏进库
-    assert not rel.startswith("/") and ":" not in rel  # 不是绝对路径
+    assert "\\" not in rel
+    assert not rel.startswith("/") and ":" not in rel
     assert (var_dir(tmp_path) / rel).is_file()
 
 

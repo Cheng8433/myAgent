@@ -1,20 +1,4 @@
-"""M5 验收台 —— 状态层：建库 / 约束 / 幂等写入 / 内容寻址存档。
-
-用法：PYTHONUTF8=1 ./.venv/Scripts/python.exe scripts/m5_verify.py
-
-★ 为什么全部离线、全用临时目录：
-  这一层要验的东西全是【约束】—— "插第二次会怎样"、"两源同 id 会怎样"。
-  约束只有在被撞的时候才看得见，所以这里刻意去撞它。
-  库文件和 var/ 都开在系统临时目录里，跑完自动清掉：
-  不碰主人的 var/app.db（那里面有真实数据），也不留下垃圾。
-
-★ 每条断言都配了"反面"：光证明"我这条主键拦得住重复"不够，
-  还要证明"PLAN 初稿那条主键拦不住" —— 否则你不知道自己躲开了什么坑，
-  改回去的时候也就不知道代价。这是这个项目一贯的做法：
-  让代码招供，而不是让注释自说自话。
-
-模块位置：src/agent/memory/{db.py, store.py}
-"""
+"""M5 验收台 —— 状态层：建库 / 约束 / 幂等写入 / 内容寻址存档。"""
 
 from __future__ import annotations
 
@@ -60,12 +44,6 @@ def _raise(fn) -> str:
     return "没抛"
 
 
-# ★ 这里【点名列出列】而不是 `insert into steps values (?,...)`：
-#   位置式写法在 M6 给 steps 加了 latency_ms / error 两列之后，
-#   会当场变成 "table steps has 10 columns but 8 values were supplied" ——
-#   而这条报错指向的是"测试写坏了"，看不出"表加了两列"这个真正的起因。
-#   点名之后，加列不再打断它（新列走 DEFAULT），这台上量的是【主键】这件事，
-#   不该被无关的 schema 变动牵连。
 _INSERT_STEPS = (
     "insert into steps"
     " (run_id, seq, step, kind, detail, ok, prompt_tokens, completion_tokens)"
@@ -74,21 +52,12 @@ _INSERT_STEPS = (
 
 
 def main() -> None:
-    # ★ ignore_cleanup_errors=True（同 m4b_verify）：Windows 上库里还开着连接时
-    #   临时目录删不掉，那条 PermissionError 会【盖住】真正的断言失败 ——
-    #   于是你对着"文件被占用"查半天，而真凶其实是上面某一行断言。
-    #   这条纪律本项目已经立法（见 logs.shutdown_logging / memory 关连接），
-    #   这里补上当初漏掉的一处。
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmp_path = Path(tmp)
 
-        # ══════════════════════════════════════════════════════════
-        #  ① 建库：三张表 + 三条 PRAGMA 真的生效
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ① 建库：三张表 + 三条 PRAGMA ═══")
         conn = connect(tmp_path / "app.db")
         ensure_schema(conn)
-        # ② 建表幂等 —— 每次启动都会无脑调一次，第二次绝不能炸。
         ensure_schema(conn)
 
         tables = {r[0] for r in conn.execute("select name from sqlite_master where type='table'")}
@@ -97,9 +66,6 @@ def main() -> None:
         check("journal_mode", conn.execute("pragma journal_mode").fetchone()[0], "wal", "库级")
         check("busy_timeout", conn.execute("pragma busy_timeout").fetchone()[0], 5000, "毫秒")
 
-        # ══════════════════════════════════════════════════════════
-        #  ② 两条主键真的拦得住（每条都带反面对照）
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ② 主键：拦得住重复吗（含反面对照）═══")
         conn.execute(
             "insert into runs (run_id, started_at, status) values (?, ?, ?)",
@@ -107,7 +73,6 @@ def main() -> None:
         )
         row = ("r1", 0, 1, "llm", "stop", None, 10, 5)
 
-        # ── 反面：PLAN 初稿给 steps 写的主键，含两列 NULL ──
         conn.execute(
             "create table legacy_steps (run_id text, step int, tool text, args text,"
             " primary key (run_id, step, tool, args))"
@@ -122,7 +87,6 @@ def main() -> None:
             "★ 2 行 = 去重失效。SQLite 的主键不拒 NULL，而 llm 步的 tool/args 天然是 NULL",
         )
 
-        # ── 正面：现役主键 (run_id, seq) ──
         conn.execute(_INSERT_STEPS, row)
         check(
             "正面：现役主键 (run_id,seq)，同一行插两次",
@@ -131,7 +95,6 @@ def main() -> None:
         )
 
         print()
-        # ── 外键：确保 ① 里那条 PRAGMA 不是摆设 ──
         check(
             "野 run_id（外键）",
             _raise(
@@ -145,7 +108,6 @@ def main() -> None:
         )
 
         print()
-        # ── jobs 的复合主键：跨源共存 + 同源去重 ──
         upsert_jobs(conn, [_job("1", "remoteok 的 1 号")], raw_path=None, run_id="r1")
         inserted = upsert_jobs(
             conn, [_job("1", "ncss 的 1 号", source="ncss")], raw_path=None, run_id="r1"
@@ -159,9 +121,6 @@ def main() -> None:
             {"inserted": 0, "updated": 1},
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ③ upsert 幂等：历史事实 vs 当前状态
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ③ upsert 幂等：第二次不该多出一行 ═══")
         page = [_job("10", "原始标题"), _job("11", "第二条")]
         check(
@@ -199,7 +158,6 @@ def main() -> None:
         check("title 被刷新成新值", got["title"], "改过的标题", "当前状态：每次都刷")
         check("raw_path 被刷新成新值", got["raw_path"], "raw/bb.json", "当前状态：每次都刷")
 
-        # 第三条新来的，账要能分开数
         check(
             "老两条 + 一新条",
             upsert_jobs(conn, [*page, _job("12", "新来的")], raw_path="raw/cc.json", run_id="r3"),
@@ -207,9 +165,6 @@ def main() -> None:
             "inserted 是留给日报说【今天新增几条】的",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ④ 内容寻址：同一份字节只落一次盘
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ④ archive_raw：内容寻址 ═══")
         body = b'[{"position": "x"}]'
         p1 = archive_raw(body, root=tmp_path)
@@ -234,9 +189,6 @@ def main() -> None:
         check("换一份内容", p3 != p1, True)
         check("磁盘上的文件数", len(list((tmp_path / "raw").iterdir())), 2, "同内容的没有存第二遍")
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑤ new_run_id
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑤ new_run_id：同秒也不能撞 ═══")
         a, b = new_run_id(), new_run_id()
         check(
@@ -247,9 +199,6 @@ def main() -> None:
         )
         check("格式 20260930T143012-a1b2", bool(re.fullmatch(r"\d{8}T\d{6}-[0-9a-f]{4}", a)), True)
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑥ store_page：一次抓取被消费掉 —— 原文和记录必须成对出现
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑥ store_page：存档与入库是一件事的两半 ═══")
         page = JobPage(
             jobs=[_job("90", "第九十条")],
@@ -275,9 +224,6 @@ def main() -> None:
             {"inserted": 0, "updated": 1},
             "raw 内容没变 → sha1 没变 → 磁盘上不多文件",
         )
-        # ★ 这里数的是 3 不是 2：④ 已经写了 2 份（x / y），⑥ 的第一句又写进第 3 份。
-        #   这一行真正要卡的是【再存一遍没有变成 4】—— 卡 2 是把自己的账算错了，
-        #   断言就会在代码正确时变红（假红灯，和假绿灯一样费时间）。
         check(
             "磁盘上的 raw 文件数（同上一次一样）",
             len(list((tmp_path / "raw").iterdir())),
@@ -285,13 +231,7 @@ def main() -> None:
             "3 = ④ 的 2 份 + ⑥ 的第 3 份；再存一遍没多出来",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑦ record_run：一次工作流的结局与留痕
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑦ record_run：结局与留痕 ═══")
-        # ★ 这里【不再】造 RunResult：record_run 收显式字段 ——
-        #   runs 表属于【工作流】，和 ReAct 子循环的 RunResult 不是一回事：
-        #   子循环的词表里没有"列表为空"这种结局，而工作流有。
         steps = (
             StepRecord(
                 step=1, kind="llm", detail="tool_calls", prompt_tokens=100, completion_tokens=10
@@ -332,7 +272,6 @@ def main() -> None:
             "★ 一轮点 3 个工具 → 3 条记录共用 step=1；拿 step 当主键会当场撞",
         )
 
-        # 幂等：整段替换，不是追加
         write_run()
         check(
             "重跑一遍（应整段替换）",
@@ -341,7 +280,6 @@ def main() -> None:
             "追加的话这里会变成 6",
         )
 
-        # 反面：拿 step 当主键会怎样 —— 前两条记录的 step 都是 1，它们【共存于库里】
         check(
             "反面：step=1 的记录在库里占了",
             sum(1 for x in rows if x["step"] == 1),

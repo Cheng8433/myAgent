@@ -1,23 +1,5 @@
-﻿# ═══════════════════════════════════════════════════════════════════
-#  注册 Windows 任务计划程序 —— PLAN §M9 的「无人值守」落点。
-#
-#  用法（普通 PowerShell 窗口，不需要管理员）：
-#      powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1
-#
-#  ★ 为什么是任务计划程序而不是 APScheduler 常驻进程：
-#    本项目每天只跑一次。常驻进程为了等这一次要占 24 小时的资源，
-#    还要自己处理"进程死了谁重启它"—— 任务计划程序免费提供这些。
-#    （选项与理由见 docs/ADR/001-deploy-windows-task-scheduler.md。）
-#
-#  ★ 为什么任务动作只有一行 `cmd /c run_report.cmd`：
-#    工作目录 / UTF-8 / venv / 日志重定向都收在那个 .cmd 里，
-#    手动跑和自动跑走【同一个入口】—— 排查时不必猜"任务里的命令和
-#    我手敲的有什么区别"。
-#
-#  ★ MultipleInstances=IgnoreNew 是单实例锁之外的第二层：
-#    任务计划程序层面就不让第二个实例启动；app.lock 兜的是"人手动跑"
-#    和"任务恰好同时跑"这两条它管不到的路径。两层各治一种情况。
-# ═══════════════════════════════════════════════════════════════════
+﻿# 注册 Windows 任务计划程序：每天 08:00 运行 scripts\run_report.cmd。
+# 用法：powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1
 
 $ErrorActionPreference = "Stop"
 
@@ -34,9 +16,7 @@ if (-not (Test-Path $runner)) {
 }
 
 $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$runner`""
-# 每天 08:00（东八区，本机时区）。★ 时间点选在上班前：
-# 若登录态过期，主人早上打开电脑就能看到退出码 3 的提示并续期，
-# 而不是等到晚上才发现今天没有日报。
+# 每天 08:00（本机时区，东八区）。选在上班前，登录过期能及早发现。
 $trigger = New-ScheduledTaskTrigger -Daily -At "08:00"
 $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `

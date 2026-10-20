@@ -1,21 +1,4 @@
-"""M4b 验收台 —— 确定性主流程：翻页 / 两阶段 / 渲染 / 落盘 / 落库。
-
-用法：PYTHONUTF8=1 ./.venv/Scripts/python.exe scripts/m4b_verify.py
-
-★ 为什么全程离线、假数据源 + 假 LLM + 临时目录：
-  M4b 要验的是【编排的形状】，不是模型或站点的脾气 ——
-  "抓第 3 页失败时库动没动"这个问题，答案必须每次都一样。
-  假 fetch_page 每次返回剧本里写好的页，还记下自己被问过哪些页码，
-  于是"循环有没有在该停的地方停"变成一个可断言的事实，而不是感觉。
-  库文件与 var/ 都开在系统临时目录里：不碰主人的 var/app.db，跑完自动清。
-
-★ 每一节的断言都尽量钉【一条只能靠理解才写得对的东西】，而不是"跑通了"：
-  例如 ③ 钉的是"失败 ⇒ 零写入"（两阶段的可执行定义），
-  ⑤ 钉的是"没链接的岗位也占一行"（抓 if not job.url: continue 的写法），
-  ⑥ 钉的是"一个标题就能拆坏整张表"（Markdown 不报错，所以只能靠断言）。
-
-模块位置：src/workflows/{daily_report.py, report.py}、src/app/main.py
-"""
+"""M4b 验收台 —— 确定性主流程：翻页 / 两阶段 / 渲染 / 落盘 / 落库。"""
 
 from __future__ import annotations
 
@@ -54,11 +37,6 @@ def check(label: str, got: object, want: object, note: str = "") -> None:
     print(f"   {'OK ' if ok else 'BAD'} {label} → {got!r}   期望 {want!r}  {note}")
 
 
-# ══════════════════════════════════════════════════════════════
-#  测试替身
-# ══════════════════════════════════════════════════════════════
-
-
 def _job(
     sid: str,
     *,
@@ -79,14 +57,10 @@ def _job(
 def fetch_script(
     pages: dict[int, list[Job]], *, fail_on: int | None = None, error: Exception | None = None
 ):
-    """造一个假 fetch_page。返回 (函数, 被请求过的页码列表)。
-
-    ★ 那个页码列表就是本节的判据：翻页循环有没有在该停的地方停，
-      看的是它【问过哪些页】，而不是它最后返回了什么。
-    """
+    """造一个假 fetch_page。返回 (函数, 被请求过的页码列表)。"""
     called: list[int] = []
 
-    def fetch(page: int) -> JobPage:
+    def fetch(page: int, *, source=None) -> JobPage:
         called.append(page)
         if fail_on is not None and page == fail_on:
             raise error
@@ -96,15 +70,7 @@ def fetch_script(
 
 
 class FakeLLM:
-    """假 Provider —— 三种脾气：正常答一句 / 永远点单 / 直接抛错。
-
-    ★ 它同样要遵守 Provider 契约第 3 条：回填真实 token 用量。
-      填 0 的话，⑤ 里那条"runs 的 token = 子 run 的累计"就永远成立得毫无意义。
-
-    ★ M6 起协议多了 `model`（trace 要拿它做成本归因），所以这里也得报一个。
-      写死一个假的就行 —— 这台验收台关心的是"这个字段有没有被带下去"，
-      不是"模型名对不对"（那要真链路才验得了）。
-    """
+    """假 Provider —— 三种脾气：正常答一句 / 永远点单 / 直接抛错。"""
 
     model = "fake-model"
 
@@ -130,8 +96,6 @@ class FakeLLM:
         if self.error is not None:
             raise self.error
         if self.always_wants:
-            # ★ 刻意点一个【不存在】的工具名：loop 的 Act 分支是按全局 TOOLS
-            #   注册表查名字的（不是按传进去的 tool_names），点真名会真的发网络请求。
             return LLMResponse(
                 content=None,
                 tool_calls=[ToolCall(id="c1", name="no_such_tool", arguments="{}")],
@@ -189,12 +153,9 @@ def main() -> None:
             root.mkdir()
             conn = connect(root / "app.db")
             ensure_schema(conn)
-            opened.append(conn)  # ★ 记下来统一关：Windows 上连接没关，临时目录删不掉
+            opened.append(conn)
             return conn, root
 
-        # ══════════════════════════════════════════════════════════
-        #  ① 翻页：空页就是【翻到底了】
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ① 翻页：空页是唯一正常的出口 ═══")
         full = {
             1: [_job(str(i)) for i in range(20)],
@@ -208,9 +169,6 @@ def main() -> None:
         check("返回的页数", len(pages), 2, "空页【不】收进列表 —— 它的意思是「没有更多了」")
         check("每页的条数", [len(p.jobs) for p in pages], [20, 20])
 
-        # ══════════════════════════════════════════════════════════
-        #  ② 护栏：远端永远不返回空页
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ② 护栏：远端永远给得出东西 ═══")
         endless = {i: [_job(str(i))] for i in range(1, 11)}
         fetch, called = fetch_script(endless)
@@ -219,9 +177,6 @@ def main() -> None:
         check("被请求过的页码", called, [1, 2, 3], "★ 没有这道护栏，分页参数一失效就是无限抓")
         check("返回的页数", len(pages), 3, "第二个出口：抓满 max_pages 就收手")
 
-        # ══════════════════════════════════════════════════════════
-        #  ③ 两阶段：抓取失败 ⇒ 库一行都没动
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ③ 两阶段：抓取中途失败，库动没动 ═══")
         conn, root = fresh("c")
         boom = SourceError("HTTP 403：remoteok 访问异常，不可重试")
@@ -253,9 +208,6 @@ def main() -> None:
             "三个出口都要留痕，而 failed 是最不能漏的那条",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ④ 判空：抓到了，只是没有岗位
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ④ 判空：抓取成功但一条都没有 ═══")
         conn, root = fresh("d")
         fetch, called = fetch_script({1: []})
@@ -272,9 +224,6 @@ def main() -> None:
             STATUS_NO_ITEMS,
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑤ 全流程：抓 → 存 → 摘要 → 落盘 → 落库
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑤ 全流程：一次成功的日报 ═══")
         conn, root = fresh("e")
         batch = [
@@ -329,12 +278,6 @@ def main() -> None:
             ["fetch:1页/3条", "store:+3/~0", f"report:{rep.report_path}"],
         )
 
-        # ★ M6 对账第 3 条那笔债的回归护栏：编排层那三条 workflow 留痕要各自在
-        #   【创建的这一刻】打 ts，而不是留空、退回落盘时刻。真实 run 抓到过退回
-        #   的样子：fetch/store 的 ts 落在 run 收尾的 .580，反而晚于它们之后才发生的
-        #   llm（.569）—— 按 ts 排序会得到一个物理上不可能的顺序。所以这里断言两件：
-        #   ① workflow 行都带着自己的 ts；② 整份文件的 ts 随行序单调不减
-        #      （行序 = records 的构建顺序 = 真实发生顺序）。
         trace_lines = [
             json.loads(ln)
             for ln in (var_dir(root) / "traces" / f"run-{rep.run_id}.jsonl")
@@ -384,9 +327,6 @@ def main() -> None:
             "空列表 = 请求里根本没有 tools 键 —— 模型只能写，不能跑去多抓一页",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑥ 渲染：一个标题就能拆坏整张表
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑥ 渲染：脏字符 ═══")
         dirty = [
             _job("1", title="带竖线的|岗位", company="甲\n公司"),
@@ -408,16 +348,7 @@ def main() -> None:
         check("空列表也给出表头", len(_render_table([])[0].splitlines()), 2)
         check("空列表的缺链接计数", _render_table([])[1], 0)
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑦ 落盘幂等：再跑一次，写出来的东西一样
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑦ 落盘幂等：同一天跑两次 ═══")
-        # ★ 这里能断言"逐字节相同"，靠的是【假 LLM 每次说同一句话】。
-        #   真链路上摘要那段文字每次都不同（模型非确定性，代码里没设 temperature）
-        #   —— 2026-10-07 实测：表格逐字节相同，只有摘要那行变了。
-        #   所以"幂等"的准确范围是：**表格、计数、库里的行**，不含模型写的那段话。
-        #   这不是本节在放水，而是"离线验收台只验确定性层"的本来面目 ——
-        #   模型的不确定性归 M7 的评估管，不该混进这里。
         fetch, _ = fetch_script({1: batch, 2: []})
         with patch.object(dr, "fetch_page", fetch):
             rep2 = run_daily_report(
@@ -459,9 +390,6 @@ def main() -> None:
             "历史事实：换了 run 也不许改写",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑧ 摘要降级：子 run 没跑完，日报照样出来
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑧ 摘要降级：子 run 撞上预算 ═══")
         conn, root = fresh("h")
         fetch, _ = fetch_script({1: [_job("1")], 2: []})
@@ -494,9 +422,6 @@ def main() -> None:
             "没答完也是花过钱的，这笔账不能不算",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑨ 摘要趟抛错：日报不该跟着陪葬
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑨ 摘要趟抛错（LLM 挂了）═══")
         conn, root = fresh("i")
         fetch, _ = fetch_script({1: [_job("1")], 2: []})
@@ -539,9 +464,6 @@ def main() -> None:
             "连 runs 都没有 = 这次 run 在账本上根本不存在",
         )
 
-        # ══════════════════════════════════════════════════════════
-        #  ⑩ 退出码：对外的契约
-        # ══════════════════════════════════════════════════════════
         print("\n═══ ⑩ 退出码 ═══")
         quiet = io.StringIO()
         with contextlib.redirect_stdout(quiet):
@@ -568,8 +490,6 @@ def main() -> None:
             "★ 宁可当场炸，也别静默当成功；消息里还要带上拿到的是什么",
         )
 
-        # ★ 关掉所有连接再退出 with：Windows 上文件被占用时删不掉临时目录，
-        #   那条 PermissionError 会盖住真正的失败信息 —— 比失败本身更费时间。
         for c in opened:
             c.close()
 

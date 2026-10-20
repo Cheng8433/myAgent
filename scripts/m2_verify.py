@@ -1,17 +1,6 @@
-"""M2a 验收脚本 —— 验工具层的【两条路】，而不只是"能跑通"。
+"""M2a 验收脚本 —— 验工具层的【两条路】，而不只是"能跑通"。"""
 
-    路 A（正常）：数据源给出职位 → {"ok": True,  "items": [...], ...}
-    路 B（失败）：数据源抛异常   → {"ok": False, "error": ..., "hint": ...}
-
-★ 路 B 才是 M2 的核心考点，也最容易被写漏 ——
-  一个只测过成功路径的工具层，等于没测。
-  真实的坏天气（登录失效、网络抖动）恰恰全在路 B。
-
-运行：
-    PYTHONUTF8=1 ./.venv/Scripts/python.exe scripts/m2_verify.py
-"""
-
-import agent.tools.jobs as jobs_mod  # ← 必须 import，@tool 才会在 import 时注册
+import agent.tools.jobs as jobs_mod
 from agent.tools.jobs import fetch_job_list
 from agent.tools.registry import TOOLS, openai_tools
 from agent.tools.sources.base import JobPage, LoginExpired, SourceError
@@ -27,8 +16,6 @@ EXPECTED_ITEM_KEYS = {
     "extras",
 }
 
-# 要和 RemoteOkSource.list_jobs 的 limit 默认值保持一致。
-# 工具层没暴露 limit，所以这里写死 —— 哪天改了默认值，记得同步这里。
 PAGE_LIMIT = 20
 
 
@@ -54,14 +41,11 @@ def check_normal_path() -> None:
     assert result["count"] == len(result["items"]) >= 1, "count 和 items 对不上"
 
     for item in result["items"]:
-        # ★ 考点 1：字段形状必须整齐（raw[0] 那个声明对象混进来就会破形）
         assert set(item) == EXPECTED_ITEM_KEYS, f"字段形状不对：{sorted(item)}"
-        # ★ 考点 2：没有 position 的行必须已被跳过 —— 不许出现空标题
         assert item["title"].strip(), f"混进了空标题的脏数据：{item}"
         assert item["source"] == "remoteok"
         assert isinstance(item["source_id"], str) and item["source_id"]
         assert item["source_id"] != "None", "id 缺失时被 str() 成了字符串 'None'"
-        # ★ 考点 3：description 绝不能进 extras（6KB/条，一页 120KB 会烧穿上下文）
         assert "description" not in item["extras"], "description 混进 extras 了"
 
     first = result["items"][0]
@@ -79,9 +63,6 @@ def check_pagination() -> None:
     assert ids1 and ids2, "某一页是空的，分页没生效"
     assert not (ids1 & ids2), f"两页有重叠，切片起点算错了：{sorted(ids1 & ids2)[:3]}"
 
-    # ★ 考点：每页必须【正好】是 limit 条。只验"零重叠"是抓不住这类 bug 的 ——
-    #   声明对象留在切片里时，两页依然不重叠，只是第一页少一条（19 而非 20）。
-    #   「数字不对」比「直接崩溃」难发现得多，所以断言必须卡住具体的数。
     assert page1["count"] == PAGE_LIMIT, (
         f"第 1 页应有 {PAGE_LIMIT} 条，实际 {page1['count']} 条 —— "
         "多半是那个声明对象还留在切片里，被后面的 title 过滤器吃掉了"
@@ -89,27 +70,17 @@ def check_pagination() -> None:
     assert page2["count"] == PAGE_LIMIT, f"第 2 页应有 {PAGE_LIMIT} 条，实际 {page2['count']} 条"
     print(f"  第 1 页 {len(ids1)} 条 / 第 2 页 {len(ids2)} 条，零重叠且页满 ✓")
 
-    # ★ 考点：翻到底不是错误。ok=True + 空列表 是合法状态，
-    #   模型必须能区分"没有更多了"和"出错了"——这两种情况的下一步完全不同。
     empty = fetch_job_list(page=50)
     assert empty["ok"] is True and empty["count"] == 0, "翻到底不该报错，应是 ok=True + 空列表"
     print("  翻到第 50 页：ok=True, count=0 ✓（空页 ≠ 出错）")
 
 
 def check_policy_single_source() -> None:
-    """考点：重试策略从工具【自己的声明】推导，不手抄（M4b 欠账的兑现点）。
-
-    fetch_page 曾经写死 policy_for("read")，和装饰器上的 side_effect="read"
-    是同一个事实的两个出处 —— 改一处、忘一处，不报错。这条断言把"两处分家"
-    变成可执行的：翻转工具的声明，重试策略必须【跟着变】。
-    """
+    """考点：重试策略从工具【自己的声明】推导，不手抄（M4b 欠账的兑现点）。"""
     print("\n═══ 考点：重试策略的单一出处 ═══")
     spec = TOOLS["fetch_job_list"]
     original = spec.side_effect
     try:
-        # ★ 翻到 external（attempts=1）而不是 write —— read 与 write 的策略
-        #   【当前完全相同】(attempts/base/cap 一模一样)，拿它们互翻等于没测。
-        #   挑一个【能分辨结果】的值，这条断言才有意义。
         spec.side_effect = "external"
         assert jobs_mod._fetch_policy().attempts == 1, (
             "改了工具的声明，重试策略却没跟着变 —— 策略多半还是手抄的字符串字面量"
@@ -117,7 +88,7 @@ def check_policy_single_source() -> None:
         spec.side_effect = "read"
         assert jobs_mod._fetch_policy().attempts == 3, "改回 read 后策略没回来"
     finally:
-        spec.side_effect = original  # 注册表是全局单例，验完必须还原
+        spec.side_effect = original
     print("  翻转 side_effect：external→1 次 / read→3 次，策略跟着声明走 ✓")
 
 
@@ -134,12 +105,7 @@ class _Boom:
 
 
 def _patch_source(exc: Exception) -> None:
-    """把 jobs 模块里的 get_source 换成"一调用就抛 exc"的替身。
-
-    ★ 注意：改的是 agent.tools.jobs 命名空间里的 get_source，
-      因为它当初是 `from ... import get_source` 绑进来的 ——
-      改 agent.tools.sources.get_source 是没用的。这个细节 M7 写测试时会再遇到。
-    """
+    """把 jobs 模块里的 get_source 换成"一调用就抛 exc"的替身。"""
     jobs_mod.get_source = lambda: _Boom(exc)
 
 

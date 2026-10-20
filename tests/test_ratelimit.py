@@ -1,10 +1,4 @@
-"""限速与礼貌（M8 §7）—— 翻页节流 + 一天一次。
-
-★ 两条规则各治一种病，所以分开断言：
-  · 翻页节流管"一次 run【内部】"的请求间隔（治轰炸）；
-  · 一天一次管"跨 run"的重复抓取（治同一个实名账号一天被请求多轮）。
-  只做其中一条，另一条路上仍然可以打出同样的请求量。
-"""
+"""限速与礼貌（M8 §7）—— 翻页节流 + 一天一次。"""
 
 from __future__ import annotations
 
@@ -20,9 +14,15 @@ from agent.guardrails.ratelimit import (
     page_delay,
 )
 from agent.memory.store import record_run
-from agent.tools.sources.base import Job, JobPage
+from agent.tools.sources.base import Job, JobPage, SourceUnreachable
 from workflows import daily_report as dr
-from workflows.daily_report import STATUS_ALREADY_RAN, STATUS_SUCCESS, run_daily_report
+from workflows.daily_report import (
+    STATUS_ALREADY_RAN,
+    STATUS_FAILED,
+    STATUS_SUCCESS,
+    STATUS_UNREACHABLE,
+    run_daily_report,
+)
 from workflows.report import CN_TZ, day_start_utc
 
 
@@ -49,7 +49,7 @@ def _job(sid: str) -> Job:
 def _fetch_script(script: dict[int, list[Job]]):
     calls: list[int] = []
 
-    def fetch(page: int) -> JobPage:
+    def fetch(page: int, *, source=None) -> JobPage:
         calls.append(page)
         return JobPage(jobs=script.get(page, []), raw=f'{{"page": {page}}}'.encode())
 
@@ -67,9 +67,6 @@ def _seed_run(conn, status: str) -> None:
         started_at=datetime.now(UTC).isoformat(),
         error="种子" if status == "failed" else None,
     )
-
-
-# ── ① 等待时长：硬下限 + 抖动 ────────────────────────────────────────────
 
 
 def test_page_delay_is_floor_plus_jitter():
@@ -90,9 +87,6 @@ def test_page_delay_passes_the_plan_jitter_range():
     assert seen == [(0.5, 2.0)]
 
 
-# ── ② 翻页节流：只对 ncss、只从第 2 页起 ─────────────────────────────────
-
-
 def test_polite_source_sleeps_between_pages(monkeypatch):
     fetch, calls = _fetch_script({1: [_job("1")], 2: [_job("2")], 3: []})
     monkeypatch.setattr(dr, "fetch_page", fetch)
@@ -102,7 +96,6 @@ def test_polite_source_sleeps_between_pages(monkeypatch):
 
     assert calls == [1, 2, 3]
     assert len(pages) == 2
-    # ★ 次数 = 页数 - 1：第 1 页之前没有"上一个请求"要拉开距离。
     assert len(sleeps) == 2
     assert all(
         MIN_PAGE_DELAY_SECONDS < s <= MIN_PAGE_DELAY_SECONDS + JITTER_RANGE[1] for s in sleeps
@@ -117,7 +110,7 @@ def test_dev_source_does_not_sleep(monkeypatch):
     dr.fetch_all_pages(source=_Source("remoteok"), sleep=sleeps.append)
 
     assert calls == [1, 2]
-    assert sleeps == []  # remoteok 是替身：不为它拖慢每一次离线回放
+    assert sleeps == []
 
 
 def test_no_source_means_no_sleep(monkeypatch):
@@ -136,7 +129,21 @@ def test_polite_sources_is_explicit():
     assert POLITE_SOURCES == frozenset({"ncss"})
 
 
-# ── ③ 一天一次：判据与例外 ───────────────────────────────────────────────
+def test_the_same_source_is_handed_to_every_page(monkeypatch):
+    """整轮一条连接的前提：每一页拿到的都是【同一个源对象】。"""
+    seen: list[object] = []
+    fetch, _ = _fetch_script({1: [_job("1")], 2: []})
+
+    def recording(page, *, source=None):
+        seen.append(source)
+        return fetch(page, source=source)
+
+    monkeypatch.setattr(dr, "fetch_page", recording)
+    src = _Source("ncss")
+
+    dr.fetch_all_pages(source=src, sleep=lambda _s: None)
+
+    assert seen == [src, src]
 
 
 def test_second_run_same_day_is_skipped(monkeypatch, conn, tmp_path):
@@ -159,11 +166,8 @@ def test_second_run_same_day_is_skipped(monkeypatch, conn, tmp_path):
         source=_Source("ncss"),
     )
     assert second.status == STATUS_ALREADY_RAN
-    # ★ 关键：第二次一次请求都没发 —— 不是"抓完才发现重复"。
     assert calls == [1, 2]
 
-    # 跳过不自我延续：第三次仍然会被【第一条 success】拦住，
-    # 而不是被上一条 already_ran 拦住（两种情况下行为一样，但原因不能错）。
     third = run_daily_report(
         conn,
         FakeLLM(),
@@ -179,11 +183,7 @@ def test_second_run_same_day_is_skipped(monkeypatch, conn, tmp_path):
 
 
 def test_login_expired_does_not_consume_the_daily_quota(monkeypatch, conn, tmp_path):
-    """★ 登录过期一次请求都没发出去，而且主人续期后需要【立刻重跑】。
-
-    把它算进额度，等于"今天登过期了，明天才能出报告"—— 惩罚的正是
-    最需要重试的那一次。
-    """
+    """登录过期一次请求都没发出去，而且主人续期后需要【立刻重跑】。"""
     _seed_run(conn, "login_expired")
     fetch, calls = _fetch_script({1: [_job("1")], 2: []})
     monkeypatch.setattr(dr, "fetch_page", fetch)
@@ -221,6 +221,83 @@ def test_failed_run_counts_as_already_ran(monkeypatch, conn, tmp_path):
     assert calls == []
 
 
+def _unreachable_on(page_to_fail: int):
+    """第 page_to_fail 页抛 SourceUnreachable，其余页正常。"""
+    calls: list[int] = []
+
+    def fetch(page: int, *, source=None) -> JobPage:
+        calls.append(page)
+        if page == page_to_fail:
+            raise SourceUnreachable("ncss 连不上，未发出 HTTP 请求：boom")
+        return JobPage(jobs=[_job(str(page))], raw=b'{"ok": true}')
+
+    return fetch, calls
+
+
+def test_first_page_unreachable_does_not_consume_the_daily_quota(monkeypatch, conn, tmp_path):
+    """第一页就连不上：一个 HTTP 请求都没发出去，站点没被查询过。"""
+    fetch, calls = _unreachable_on(1)
+    monkeypatch.setattr(dr, "fetch_page", fetch)
+
+    first = run_daily_report(
+        conn,
+        FakeLLM(),
+        run_id="unreachable",
+        budget=wide_budget(),
+        root=tmp_path,
+        source=_Source("ncss"),
+    )
+    assert first.status == STATUS_UNREACHABLE
+    assert calls == [1]
+
+    fetch_ok, calls_ok = _fetch_script({1: [_job("1")], 2: []})
+    monkeypatch.setattr(dr, "fetch_page", fetch_ok)
+    monkeypatch.setattr(dr.time, "sleep", lambda _s: None)
+    again = run_daily_report(
+        conn,
+        FakeLLM(),
+        run_id="after-unreachable",
+        budget=wide_budget(),
+        root=tmp_path,
+        source=_Source("ncss"),
+    )
+    assert again.status == STATUS_SUCCESS
+    assert calls_ok == [1, 2]
+
+
+def test_unreachable_after_a_successful_page_still_counts_as_failed(monkeypatch, conn, tmp_path):
+    """抓过第 1 页之后才断网 —— 站点已经被请求过，这次仍记 failed、仍占额度。"""
+    fetch, calls = _unreachable_on(2)
+    monkeypatch.setattr(dr, "fetch_page", fetch)
+    monkeypatch.setattr(dr.time, "sleep", lambda _s: None)
+
+    first = run_daily_report(
+        conn,
+        FakeLLM(),
+        run_id="unreachable-page2",
+        budget=wide_budget(),
+        root=tmp_path,
+        source=_Source("ncss"),
+    )
+    assert first.status == STATUS_FAILED
+    assert calls == [1, 2]
+    assert "前 1 页已抓取" in first.detail
+    assert "第 2 页不可达" in first.detail
+
+    fetch_ok, calls_ok = _fetch_script({1: [_job("1")], 2: []})
+    monkeypatch.setattr(dr, "fetch_page", fetch_ok)
+    again = run_daily_report(
+        conn,
+        FakeLLM(),
+        run_id="after-page2-fail",
+        budget=wide_budget(),
+        root=tmp_path,
+        source=_Source("ncss"),
+    )
+    assert again.status == STATUS_ALREADY_RAN
+    assert calls_ok == []
+
+
 def test_dev_source_ignores_the_daily_quota(monkeypatch, conn, tmp_path):
     """remoteok 是替身：L2 回放要能在同一天连跑两次（幂等那条断言靠它）。"""
     _seed_run(conn, STATUS_SUCCESS)
@@ -240,9 +317,6 @@ def test_dev_source_ignores_the_daily_quota(monkeypatch, conn, tmp_path):
     assert calls == [1, 2]
 
 
-# ── ④ "一天"的边界按东八区算 ─────────────────────────────────────────────
-
-
 @pytest.mark.parametrize(
     ("local", "expected"),
     [
@@ -254,3 +328,64 @@ def test_dev_source_ignores_the_daily_quota(monkeypatch, conn, tmp_path):
 def test_day_start_uses_china_midnight(local, expected):
     """UTC 零点是错的：早上 08:00 之前跑的那一次会被算进前一天。"""
     assert day_start_utc(now=local) == expected
+
+
+class _ClosableSource(_Source):
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def _run(conn, root, *, source=None, run_id="owned"):
+    return run_daily_report(
+        conn,
+        FakeLLM(),
+        run_id=run_id,
+        budget=wide_budget(),
+        root=root,
+        source=source,
+    )
+
+
+def test_workflow_closes_the_source_it_created(monkeypatch, conn, tmp_path):
+    """整轮复用一条连接的前提是：编排层造的源，编排层关。"""
+    src = _ClosableSource("ncss")
+    monkeypatch.setattr(dr, "get_source", lambda: src)
+    fetch, calls = _fetch_script({1: [_job("1")], 2: []})
+    monkeypatch.setattr(dr, "fetch_page", fetch)
+    monkeypatch.setattr(dr.time, "sleep", lambda _s: None)
+
+    rep = _run(conn, tmp_path)
+
+    assert rep.status == STATUS_SUCCESS
+    assert calls == [1, 2]
+    assert src.closed == 1
+
+
+def test_workflow_does_not_close_an_injected_source(monkeypatch, conn, tmp_path):
+    """注入的源由调用方关闭 —— 编排层只借，不拥有。"""
+    src = _ClosableSource("ncss")
+    fetch, calls = _fetch_script({1: [_job("1")], 2: []})
+    monkeypatch.setattr(dr, "fetch_page", fetch)
+    monkeypatch.setattr(dr.time, "sleep", lambda _s: None)
+
+    rep = _run(conn, tmp_path, source=src, run_id="injected")
+
+    assert rep.status == STATUS_SUCCESS
+    assert calls == [1, 2]
+    assert src.closed == 0
+
+
+def test_workflow_closes_owned_source_even_when_skipping(monkeypatch, conn, tmp_path):
+    """already_ran 是早退支 —— 早退也不能漏掉 close。"""
+    _seed_run(conn, STATUS_SUCCESS)
+    src = _ClosableSource("ncss")
+    monkeypatch.setattr(dr, "get_source", lambda: src)
+
+    rep = _run(conn, tmp_path, run_id="skip")
+
+    assert rep.status == STATUS_ALREADY_RAN
+    assert src.closed == 1

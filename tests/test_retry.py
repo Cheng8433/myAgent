@@ -1,12 +1,4 @@
-"""重试单测 —— 策略【按副作用派发】，不是按异常类型。
-
-★ 两个问题两张表：异常说"出了什么事"，side_effect 才说"重发安不安全"。
-  所以这里既断言"read 重试 3 次 vs external 1 次"，也断言"永久错误一次都不重试"
-  （后者靠 retry_on 的 except 子句表达，不需要额外分支 —— 那正是分类的价值）。
-★ 抖动只落在【一处】、且顺序是 基准 → 夹 cap → 抖：断言 sleeper 收到的序列，
-  而不是"睡过"。注入 rand/sleep 就是为了让"退了多少"可复现 ——
-  不注入就只能断言"睡过"，那等于没断言。
-"""
+"""重试单测 —— 策略【按副作用派发】，不是按异常类型。"""
 
 from __future__ import annotations
 
@@ -38,8 +30,8 @@ def _counting(exc: BaseException):
 def test_policy_dispatch_by_side_effect():
     assert policy_for("read").attempts == 3
     assert policy_for("write").attempts == 3
-    assert policy_for("external").attempts == 1  # 飞书没有幂等键 → 不许重试
-    assert policy_for("nonsense").attempts == 1  # 未知等级 → 保守，不重试
+    assert policy_for("external").attempts == 1
+    assert policy_for("nonsense").attempts == 1
 
 
 def test_attempts_below_one_rejected_at_construction():
@@ -96,7 +88,7 @@ def test_retry_after_is_clamped_then_jittered():
             sleep=slept.append,
             rand=lambda: 1.0,
         )
-    assert slept == [10.0]  # min(3600, 10) = 10，再 ×1.0
+    assert slept == [10.0]
 
 
 def test_transient_base_class_retries_llm_error():

@@ -1,10 +1,4 @@
-"""CLI 的对外契约（M9）—— 退出码与两个新子命令的只读边界。
-
-★ 退出码是给 cron / 任务计划程序读的唯一稳定信号，所以这里钉三件事：
-  · 配置错误 → 2（不是未捕获异常的 1）：两种病该去的地方不同；
-  · 已有实例 → 4（不是失败 1）：重试只会再撞一次锁；
-  · status 只读：跑一次不抓取、不写心跳、不改库（除了幂等建表）。
-"""
+"""CLI 的对外契约（M9）—— 退出码与两个新子命令的只读边界。"""
 
 from __future__ import annotations
 
@@ -36,6 +30,17 @@ def test_second_report_gets_busy_exit_code(monkeypatch, tmp_path):
     assert called == []
 
 
+def test_unreachable_is_exit_1_but_says_the_quota_is_intact(capsys):
+    """退出码仍是 1，但输出要说明额度没被占用、可直接重跑。"""
+    from workflows.daily_report import STATUS_UNREACHABLE, DailyReport
+
+    report = DailyReport(run_id="x", status=STATUS_UNREACHABLE, detail="boom")
+    assert cli._report_outcome(report) == cli.EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "不占今日额度" in out
+    assert "网络恢复后可直接重跑" in out
+
+
 def test_hours_since_handles_bad_input():
     assert cli._hours_since(None) is None
     assert cli._hours_since("not-a-timestamp") is None
@@ -51,5 +56,4 @@ def test_status_is_read_only_and_survives_missing_login(monkeypatch, tmp_path, c
     assert "今日额度（东八区）：未使用" in out
     assert "心跳：还没有记录" in out
     assert "登录态：还没有" in out
-    # ★ 只读：没有心跳文件被创建。
     assert not (tmp_path / "heartbeat.json").exists()

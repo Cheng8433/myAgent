@@ -1,20 +1,4 @@
-"""L2 流程回放 —— 用一份【提交进仓库】的真实切片，把整条日报主流程离线跑一遍。
-
-和 L1（pytest）的分工：L1 盯【零件】（解析、去重、脱敏、渲染各自对不对），
-L2 盯【串起来的那条线】（抓→存→摘要→落盘→落库，跑两次结果一致）。
-
-★ 为什么 fixture 是 30 条（= 1 个声明对象 + 29 条岗位）而不是随手 12 条：
-  `RemoteOkSource` 每次 GET 都拿【全量】、在本地按 `(page-1)*limit` 切片
-  （limit=20）。12 条只有 1 页 —— "多页共用同一份 raw"这条性质根本断言不到。
-  30 条 → 29 条岗位 → 3 次 GET → 20 + 9 + 0（空页收尾）→ **3 页共享同一份 raw**
-  → `var/raw/` 里只有【一个】文件。这条断言是"内容寻址存档"的活证据：
-  远端一次给全量，我们翻 5 页也只落一份盘。
-
-★ 为什么在 httpx 边界用 respx、而不是 patch 掉 fetch_page：
-  patch fetch_page 等于跳过整个数据源层 —— 那 L1 已经单独测过了。
-  在 httpx 边界截住，走的是【真】remoteok 路径（真重试、真切片、真映射），
-  只有网络换成内存里的一段字节。这是"回放"该有的样子。
-"""
+"""L2 流程回放 —— 用一份【提交进仓库】的真实切片，把整条日报主流程离线跑一遍。"""
 
 from __future__ import annotations
 
@@ -36,11 +20,7 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "remoteok_sample.json"
 
 
 class _FakeLLM:
-    """回放用的假 Provider —— 每次都说同一句话，于是"跑两次逐字节相同"可断言。
-
-    ★ 只活在 eval 内部、且只此一处，故不放进 tests/_fakes —— 那会让
-      tests 与 eval 互相 import。离线与真链路的边界，就划在这一行。
-    """
+    """回放用的假 Provider —— 每次都说同一句话，于是"跑两次逐字节相同"可断言。"""
 
     model = "fake-model"
 
@@ -51,7 +31,7 @@ class _FakeLLM:
         return LLMResponse(
             content=self.text,
             tool_calls=[],
-            prompt_tokens=0,  # L2 全离线 → 不产生真实 token 成本
+            prompt_tokens=0,
             completion_tokens=0,
             finish_reason="stop",
         )
@@ -75,7 +55,7 @@ def run_replay() -> list[Check]:
     """跑 L2，返回断言结果。全程离线、临时目录，不碰主人的 var/。"""
     checks: list[Check] = []
     body = FIXTURE.read_bytes()
-    expected_jobs = 29  # 30 项切片减掉 1 个声明对象
+    expected_jobs = 29
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -121,7 +101,6 @@ def run_replay() -> list[Check]:
                 )
             )
 
-            # ── 幂等：同一天再跑一次 ──
             checks.append(
                 Check(
                     "第二次全是刷新（inserted=0）",

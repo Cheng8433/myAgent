@@ -1,6 +1,5 @@
-﻿# 卸载任务计划程序里的日报任务（回滚/停用用）。
-#   powershell -ExecutionPolicy Bypass -File scripts\unregister_task.ps1
-# 不会删除任何数据：var/、.env、登录态都原样保留。
+﻿# 卸载任务计划程序里的日报任务（回滚/停用用），不删除任何数据。
+# 用法：powershell -ExecutionPolicy Bypass -File scripts\unregister_task.ps1
 
 $ErrorActionPreference = "Stop"
 $TaskName = "myAgent Daily Report"

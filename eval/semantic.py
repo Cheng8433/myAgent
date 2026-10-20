@@ -1,25 +1,4 @@
-"""L3 语义评估 —— 只评【日报摘要】这一个 LLM 判断类产物。
-
-★ 为什么不能断言字符串相等：LLM 输出不稳定（代码里没设 temperature，
-  2026-10-07 实测同一份输入两次跑出的摘要不同）。所以断言的是**可验证的性质**，
-  不是"答得对不对"。四条性质（前三条真的绑住模型，第四条绑的是渲染器）：
-
-  ① schema_ok    合法 Markdown：非空、代码围栏成对
-  ② url_grounded ★ 摘要里出现的每个 URL 都必须在输入里存在 —— 防幻觉。
-                 PLAN §M7 点名的那一条，面试加分项：模型没有"外面的知识"
-                 可以用来编链接，能编出来的链接一定是它从输入里抄错或凭空造的。
-  ③ length_ok    长度在范围内（2~3 句话该有的长度，不是一篇作文也不是空话）
-  ④ count_match  渲染出的报告表行数 == 输入条数
-
-★ 为什么 ④ 是"渲染出的行数"，而不是 PLAN 原文的"提及的岗位数量 == 输入数量"：
-  `_summary_prompt` 明令模型"只输出概括本身，不要罗列岗位、不要输出清单"，
-  于是"提及数量"根本无法从输出里测（测出来恒为 0）。指标换成由【渲染器】
-  保证的那条 —— 它同样守着"报告里每条岗位都在"，却是确定性的、不靠模型守规矩。
-  （能确定的事交给代码，不确定的事才交给评估 —— 和 §M0"表格由代码渲染"一脉。）
-
-★ 无 key 时【诚实跳过】：不跑、不假装通过、退出码 2（同 m3_verify 的姿态）。
-  "没验证"必须是一句响的话，不能混进绿灯里。
-"""
+"""L3 语义评估 —— 只评【日报摘要】这一个 LLM 判断类产物。"""
 
 from __future__ import annotations
 
@@ -43,21 +22,11 @@ MIN_CHARS = 20
 MAX_CHARS = 600
 
 PRICE_TABLE: dict[str, tuple[float, float]] = {}
-"""模型 → (输入元/1K tokens, 输出元/1K tokens)。**故意留空**。
-
-★ 编一个价格就是报一个假的成本 —— 而"少算的账本比没有账本更危险"。
-  要报价格时，从供应商的定价页抄两个数填进来（键用 .env 里 LLM_MODEL 的值），
-  例如：  "deepseek-chat": (0.002, 0.008)   ← 这两个数是举例，别照抄。
-  留空的后果只是"只报 token、不报钱"，比"报一个假的钱"诚实得多。
-"""
+"""模型 → (输入元/1K tokens, 输出元/1K tokens)。**故意留空**。"""
 
 
 def load_jobs() -> list[Job]:
-    """今天的岗位 —— 走【真】RemoteOkSource（只有网络被 respx 换成了内存字节）。
-
-    ★ 不复用 replay 抓到的 jobs：L2 与 L3 各自独立、互不 import，
-      免得"改一层要动另一层"。代价是 fixture 被解析两遍 —— 便宜、且明确。
-    """
+    """今天的岗位 —— 走【真】RemoteOkSource（只有网络被 respx 换成了内存字节）。"""
     body = FIXTURE.read_bytes()
     with respx.mock:
         respx.get(API_URL).mock(return_value=httpx.Response(200, content=body))
@@ -113,11 +82,7 @@ def evaluate(
     *,
     budget: Budget | None = None,
 ) -> tuple[list[Check], int, int]:
-    """跑一次真的摘要调用，返回 (四条断言, prompt_tokens, completion_tokens)。
-
-    ★ 走的是生产同一条路：`workflows.daily_report._summarize`。计费就从它的
-      返回值取 —— 不另起一套"估算"，否则评估报的成本和线上对不上。
-    """
+    """跑一次真的摘要调用，返回 (四条断言, prompt_tokens, completion_tokens)。"""
     budget = budget or Budget(max_steps=4, max_tokens=10**9, max_wall_seconds=120.0)
     answer, _records, prompt_tokens, completion_tokens = _summarize(
         jobs, provider, run_id="eval", budget=budget
@@ -155,7 +120,6 @@ def _main() -> int:  # pragma: no cover —— 手工探针（离线，不需要
     by_label = {c.label: c.ok for c in checks}
     print("好的摘要 —— 四条性质：", by_label)
 
-    # 反面：塞一个不存在的链接，证明 url_grounded 真的会响（否则它是条假断言）。
     bad = "参考 https://remoteok.com/nonexistent-job-xyz 这条记录。"
     bad_ok = {c.label: c.ok for c in _summary_checks(bad, jobs)}
     print("幻觉链接的摘要 —— url_grounded：", bad_ok["url_grounded"], "（期望 False）")

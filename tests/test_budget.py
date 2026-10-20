@@ -1,10 +1,4 @@
-"""预算单测 —— 三闸的【固定顺序】与 from_env 的三路。
-
-★ 顺序为什么值得单测：两道闸同时撞破时，返回哪个完全由判断顺序决定。
-  顺序是契约（写在 budget.exceeded 的 docstring 里），不是实现细节 ——
-  乱序 = 结果不可复现 = 测不出也复现不了。所以三条路径都要各断言一次，
-  外加"三道全撞时只报第一道"。
-"""
+"""预算单测 —— 三闸的【固定顺序】与 from_env 的三路。"""
 
 from __future__ import annotations
 
@@ -47,9 +41,6 @@ def test_no_gate_hit():
     assert b.exceeded(steps=4, tokens=99, wall_seconds=9.999) is None
 
 
-# ── from_env：三道闸都是【必填】，绝不留代码里的默认值 ──────────────
-
-
 def _no_dotenv(monkeypatch):
     """顶掉 load_dotenv —— 否则主人 .env 里的值会盖住"变量缺失"那条路。"""
     monkeypatch.setattr(budget_mod, "load_dotenv", lambda: None)
@@ -61,7 +52,7 @@ def test_from_env_missing_raises(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(ValueError) as excinfo:
         Budget.from_env()
-    assert "AGENT_MAX_STEPS" in str(excinfo.value)  # 消息里要有【谁】错了
+    assert "AGENT_MAX_STEPS" in str(excinfo.value)
 
 
 def test_from_env_reads_all(monkeypatch):

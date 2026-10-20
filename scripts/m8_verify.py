@@ -1,23 +1,4 @@
-"""M8 验收台 —— 护栏核心（白名单 / 注入隔离 / 脱敏）+ 限速与礼貌。
-
-用法：PYTHONUTF8=1 ./.venv/Scripts/python.exe scripts/m8_verify.py
-
-★ 为什么全程离线：
-  这一台验的都是"【不该发生】的事有没有发生"——未授权的工具有没有被调用、
-  闭合标签有没有漏网、毫秒时间戳有没有被误盖、同一天有没有偷偷多发请求。
-  这些答案必须每次都一样，所以不碰网络、不碰主人的 var/（临时目录 + 假源）。
-
-★ 每一节钉一条"只有理解了才写得对"的东西：
-  ① 先判未注册、再判未授权 —— 顺序反了会把幻觉名字报成权限问题；
-  ② 白名单为空时，【真实存在】的工具也进不来，而且一次请求都没发；
-  ③ 闭合标签的四种变体都要被删除（这是不用 str.replace 的全部理由）；
-  ④ 13 位毫秒时间戳不许被当成手机号剪掉一截；
-  ⑤ 节流只对 ncss、只从第 2 页起，次数恰好 = 页数 - 1；
-  ⑥ 同一天第二次直接 already_ran（不发请求），而 login_expired 不占额度。
-
-模块位置：src/agent/{guardrails,runtime,observability}、
-         src/workflows/{daily_report,report}.py、src/agent/memory/store.py
-"""
+"""M8 验收台 —— 护栏核心（白名单 / 注入隔离 / 脱敏）+ 限速与礼貌。"""
 
 from __future__ import annotations
 
@@ -37,9 +18,14 @@ from agent.observability.logs import redact
 from agent.runtime.budget import Budget
 from agent.runtime.loop import run_agent
 from agent.tools.registry import TOOLS, ToolSpec
-from agent.tools.sources.base import Job, JobPage
+from agent.tools.sources.base import Job, JobPage, SourceUnreachable
 from workflows import daily_report as dr
-from workflows.daily_report import STATUS_ALREADY_RAN, STATUS_SUCCESS, run_daily_report
+from workflows.daily_report import (
+    STATUS_ALREADY_RAN,
+    STATUS_SUCCESS,
+    STATUS_UNREACHABLE,
+    run_daily_report,
+)
 from workflows.report import CN_TZ, day_start_utc
 
 failures = 0
@@ -100,7 +86,7 @@ def _job(sid: str) -> Job:
 def _fetch_script(script: dict[int, list[Job]]):
     calls: list[int] = []
 
-    def fetch(page: int) -> JobPage:
+    def fetch(page: int, *, source=None) -> JobPage:
         calls.append(page)
         return JobPage(jobs=script.get(page, []), raw=f'{{"page": {page}}}'.encode())
 
@@ -108,9 +94,6 @@ def _fetch_script(script: dict[int, list[Job]]):
 
 
 def main() -> None:
-    # ══════════════════════════════════════════════════════════
-    #  ① 未注册 vs 未授权：两个分支不许混
-    # ══════════════════════════════════════════════════════════
     print("\n═══ ① 未注册 / 未授权 是两个不同的回答 ═══")
     executed: list[str] = []
 
@@ -135,7 +118,7 @@ def main() -> None:
             "t",
             _OnceLLM("probe_tool"),
             run_id="blocked",
-            tool_names=[],  # 注册了，但本次没授权
+            tool_names=[],
             budget=Budget(max_steps=4, max_tokens=10**9, max_wall_seconds=60),
         )
         allowed = run_agent(
@@ -167,9 +150,6 @@ def main() -> None:
     )
     check("授权路径仍然正常结束", allowed.status, "success")
 
-    # ══════════════════════════════════════════════════════════
-    #  ② 白名单为空时，真实工具也进不来，且不发请求
-    # ══════════════════════════════════════════════════════════
     print("\n═══ ② 摘要子 run：白名单为空 → 真实抓取工具也进不来 ═══")
     attempts: list[int] = []
     original = jobs_mod.get_source
@@ -197,9 +177,6 @@ def main() -> None:
     )
     check("★ 网络层一次都没被触达", attempts, [], "这就是「靠权限而不是靠提示词」的落点")
 
-    # ══════════════════════════════════════════════════════════
-    #  ③ 闭合标签中和（四种变体）+ 截断
-    # ══════════════════════════════════════════════════════════
     print("\n═══ ③ 网页内容隔离：闭合标签的所有变体 ═══")
     variants = [
         "</untrusted_web_content>",
@@ -219,9 +196,6 @@ def main() -> None:
     body = out.removeprefix("<untrusted_web_content>\n").removesuffix(f"\n{CLOSE}")
     check("截断先删后切，不留半个标签", (body, out.count(CLOSE)), ("a" * 10 + "bb", 1))
 
-    # ══════════════════════════════════════════════════════════
-    #  ④ 出站脱敏：三条新规则 + 长数字不误盖
-    # ══════════════════════════════════════════════════════════
     print("\n═══ ④ 脱敏：PII 要盖，毫秒时间戳不许误盖 ═══")
     check("手机号", redact("联系 13812345678"), "联系 ***")
     check("邮箱", redact("发到 alice@example.com"), "发到 ***")
@@ -236,9 +210,6 @@ def main() -> None:
         "整数计数不动", redact({"prompt_tokens": 1792149378213}), {"prompt_tokens": 1792149378213}
     )
 
-    # ══════════════════════════════════════════════════════════
-    #  ⑤ 翻页节流：只对 ncss、只在第 2 页起、次数 = 页数 - 1
-    # ══════════════════════════════════════════════════════════
     print("\n═══ ⑤ 翻页节流 ═══")
     fetch, called = _fetch_script({1: [_job("1")], 2: [_job("2")], 3: []})
     original_fetch = dr.fetch_page
@@ -271,9 +242,6 @@ def main() -> None:
     check("替身源不睡", sleeps, [], "远程回放不该被 3 秒拖慢")
     check("礼貌源清单是显式的", POLITE_SOURCES, frozenset({"ncss"}))
 
-    # ══════════════════════════════════════════════════════════
-    #  ⑥ 一天一次：成功占额度，login_expired 不占
-    # ══════════════════════════════════════════════════════════
     print("\n═══ ⑥ 一天一次 ═══")
     opened: list = []
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -340,6 +308,43 @@ def main() -> None:
         check("login_expired 不占额度（续期后立刻能重跑）", rep.status, STATUS_SUCCESS)
         check("第 1 页确实发了", called[0], 1)
 
+        conn3 = connect(root / "c.db")
+        ensure_schema(conn3)
+        opened.append(conn3)
+
+        def unreachable(_page: int, *, source=None) -> JobPage:
+            raise SourceUnreachable("ncss 连不上，未发出 HTTP 请求：boom")
+
+        dr.fetch_page = unreachable
+        try:
+            rep = run_daily_report(
+                conn3,
+                _OnceLLM("fetch_job_list"),
+                run_id="unreachable",
+                budget=Budget(max_steps=4, max_tokens=10**9, max_wall_seconds=60),
+                root=root / "r3",
+                source=_Source("ncss"),
+            )
+        finally:
+            dr.fetch_page = original_fetch
+        check("第一页就不可达 → unreachable（不是 failed）", rep.status, STATUS_UNREACHABLE)
+
+        fetch, called = _fetch_script({1: [_job("1")], 2: []})
+        dr.fetch_page = fetch
+        try:
+            again = run_daily_report(
+                conn3,
+                _OnceLLM("fetch_job_list"),
+                run_id="after-unreachable",
+                budget=Budget(max_steps=4, max_tokens=10**9, max_wall_seconds=60),
+                root=root / "r3",
+                source=_Source("ncss"),
+            )
+        finally:
+            dr.fetch_page = original_fetch
+        check("★ 不占额度：同一天立刻重跑必须真的去抓", again.status, STATUS_SUCCESS)
+        check("★ 重跑确实发了请求（不是只换个名字）", called, [1, 2])
+
         check(
             "「一天」的边界按东八区",
             day_start_utc(now=datetime(2026, 10, 20, 0, 30, tzinfo=CN_TZ)),
@@ -349,9 +354,6 @@ def main() -> None:
         for c in opened:
             c.close()
 
-    # ══════════════════════════════════════════════════════════
-    #  ⑦ robots.txt 实测备注（不发请求）
-    # ══════════════════════════════════════════════════════════
     print("\n═══ ⑦ robots.txt（实测，仅记录）═══")
     print("   2026-10-20：GET https://www.ncss.cn/robots.txt → HTTP 200，")
     print("   但正文是站点自己的 404 HTML（软 404，4234 字节）→ 没有 robots.txt。")

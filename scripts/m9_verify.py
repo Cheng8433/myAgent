@@ -1,20 +1,4 @@
-"""M9 验收台 —— 部署的四块地基（锁 / 退出码 / 心跳 / 任务入口）。
-
-用法：PYTHONUTF8=1 ./.venv/Scripts/python.exe scripts/m9_verify.py
-
-★ 为什么全程离线：这一台验的都是"出问题时能不能看懂"的机制 ——
-  锁有没有互斥、配置错误有没有自己的退出码、心跳损坏会不会伪装成没跑过、
-  status 会不会不小心写东西。这些答案必须每次都一样，所以不联网、
-  不碰主人的 var/（临时目录 + 临时环境变量）。
-
-★ 每一节钉一条"只有理解了才写得对"的东西：
-  ① 锁：持有期间第二次被拒、释放后能再拿、异常路径也释放；
-  ② 退出码 2：配置错误不该长得像抓取失败；
-  ③ 心跳：往返、坏文件是错误而不是"没跑过"、原子写不留 .tmp；
-  ④ status：只读（不创建心跳）、缺登录态也能好好说话；
-  ⑤ 部署件齐全且指向同一个入口（手跑与自动跑不许走两条路）；
-  ⑥ report 撞锁 → 退出码 4，且没有进到锁内逻辑。
-"""
+"""M9 验收台 —— 部署的四块地基（锁 / 退出码 / 心跳 / 任务入口）。"""
 
 from __future__ import annotations
 
@@ -55,9 +39,6 @@ def main() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmp_path = Path(tmp)
 
-        # ══════════════════════════════════════════════════════
-        #  ① 单实例锁
-        # ══════════════════════════════════════════════════════
         print("\n═══ ① 单实例锁 ═══")
         lock = tmp_path / "var" / "app.lock"
         with exclusive_lock(lock):
@@ -81,9 +62,6 @@ def main() -> None:
         check("锁文件留下 pid/时间作为事后线索", ("pid=" in text, "at=" in text), (True, True))
         check("锁文件存在≠锁存在", lock.exists(), True)
 
-        # ══════════════════════════════════════════════════════
-        #  ② 配置错误 → 退出码 2
-        # ══════════════════════════════════════════════════════
         print("\n═══ ② 配置错误是 2，不是 1 ═══")
         original_report = cli.cmd_report
 
@@ -97,9 +75,6 @@ def main() -> None:
             cli.cmd_report = original_report
         check("缺少配置 → 退出码 2", code, cli.EXIT_CONFIG)
 
-        # ══════════════════════════════════════════════════════
-        #  ③ 心跳
-        # ══════════════════════════════════════════════════════
         print("\n═══ ③ 心跳文件 ═══")
         beat_dir = tmp_path / "beat"
         payload = {
@@ -126,9 +101,6 @@ def main() -> None:
             "把损坏吞成 None，等于在最需要线索时说一切正常",
         )
 
-        # ══════════════════════════════════════════════════════
-        #  ④ status 只读
-        # ══════════════════════════════════════════════════════
         print("\n═══ ④ status：只读，且缺东西也能好好说话 ═══")
         status_dir = tmp_path / "status"
         keys = ("VAR_DIR", "DB_PATH", "JOB_SOURCE")
@@ -164,9 +136,6 @@ def main() -> None:
             False,
         )
 
-        # ══════════════════════════════════════════════════════
-        #  ⑤ 部署件：手跑与自动跑走同一个入口
-        # ══════════════════════════════════════════════════════
         print("\n═══ ⑤ 部署件 ═══")
         runner = repo / "scripts" / "run_report.cmd"
         register = repo / "scripts" / "register_task.ps1"
@@ -180,9 +149,6 @@ def main() -> None:
         check("注册脚本防叠加", "IgnoreNew" in register_text, True)
         check("注册脚本每天 08:00", '"08:00"' in register_text, True)
 
-        # ══════════════════════════════════════════════════════
-        #  ⑥ report 撞锁 → 4，没有进锁内
-        # ══════════════════════════════════════════════════════
         print("\n═══ ⑥ report 撞锁 → 退出码 4 ═══")
         busy_dir = tmp_path / "busy"
         saved_var = os.environ.get("VAR_DIR")

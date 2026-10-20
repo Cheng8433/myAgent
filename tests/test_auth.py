@@ -1,10 +1,4 @@
-"""登录态基础设施的回归网（M2b Phase A）。
-
-★ 这里测的全部是【离线】能测的东西：磁盘上的读写、路径形状、cookie 的筛选。
-  真正需要浏览器的只有"过验证码"那一下，它不在这张网里 ——
-  `cmd_login` 里能离线测的那部分（URL 判据）抽成了纯函数 `_logged_in`，
-  它的用例在 test_login_expired.py。
-"""
+"""登录态基础设施的回归网（M2b Phase A）。"""
 
 from __future__ import annotations
 
@@ -24,28 +18,17 @@ from agent.tools.auth import (
 
 
 def _state() -> dict:
-    """一份形状【照实测】的 storage_state（名字与域名取自 2026-10-16 真机快照）。
-
-    ★ 为什么用真名真域、而不是随手编一个：这里原本写的是 `JSESSIONID` + `.ncss.cn`，
-      而实测快照里**根本不存在这个组合** —— `JSESSIONID` 属于 **CAS 域**
-      （`account.chsi.com.cn`，那台也跑 Tomcat），ncss 站的会话叫 **`SESSION`**。
-      假数据一旦"长得像真的、却不是"，将来有人照它反推，就会把已经推翻的结论
-      重推一遍 —— 而这次偏偏真的发生过（`docs/SITE.md` §3.2 一度就写成了 JSESSIONID）。
-    """
+    """一份形状【照实测】的 storage_state（名字与域名取自 2026-10-16 真机快照）。"""
     return {
         "cookies": [
-            # 本站 · host-only（无前导点）：会话就落在这一层，实测 Path=/student/
             {"name": "SESSION", "value": "abc", "domain": "www.ncss.cn", "path": "/student/"},
-            # 本站 · 父域（带前导点）：埋点常落在这层
             {"name": "cna", "value": "def", "domain": ".ncss.cn", "path": "/"},
-            # 别人家（CAS 域）：必须被筛掉 —— 实测里的 JSESSIONID 正是在这儿
             {
                 "name": "JSESSIONID",
                 "value": "zzz",
                 "domain": "account.chsi.com.cn",
                 "path": "/passport",
             },
-            # 无名 cookie：发出去也没用，跳过而不是记成空串
             {"name": "", "value": "无名", "domain": ".ncss.cn", "path": "/"},
         ],
         "origins": [],
@@ -60,7 +43,7 @@ def test_save_then_load_roundtrip(tmp_path):
 
 
 def test_saved_path_is_relative_posix(tmp_path):
-    """★ 路径形状是契约：绝对路径进日志/库，仓库一搬家就静默失效（M5 那笔账）。"""
+    """路径形状是契约：绝对路径进日志/库，仓库一搬家就静默失效（M5 那笔账）。"""
     rel = save_state(_state(), root=tmp_path)
     assert rel == "auth/ncss_state.json"
     assert "\\" not in rel
@@ -88,8 +71,7 @@ def test_overwrite_replaces_instead_of_appending(tmp_path):
 
 
 def test_chinese_survives_roundtrip(tmp_path):
-    """★ `ensure_ascii=False` + `encoding="utf-8"`：否则中文被转成 \\uXXXX（看不出来）
-    或写成 GBK（下次读直接 UnicodeDecodeError）。"""
+    '`ensure_ascii=False` + `encoding="utf-8"`：否则中文被转成 \\uXXXX（看不出来）'
     save_state(
         {"cookies": [{"name": "备注", "value": "已登录", "domain": ".ncss.cn"}], "origins": []},
         root=tmp_path,
@@ -98,7 +80,7 @@ def test_chinese_survives_roundtrip(tmp_path):
 
 
 def test_missing_state_raises_with_next_step(tmp_path):
-    """★ 报错消息必须包含【下一步命令】—— 这个异常的处置动作只有一个。"""
+    """报错消息必须包含【下一步命令】—— 这个异常的处置动作只有一个。"""
     with pytest.raises(AuthMissingError) as err:
         load_state(root=tmp_path)
     assert "python -m app.main login" in str(err.value)
@@ -124,31 +106,25 @@ def test_wrong_shape_raises(tmp_path):
 
 
 def test_save_rejects_wrong_shape_before_writing(tmp_path):
-    """★ 形状检查在【写的时候】：坏凭证根本进不了盘，而不是等某天读它时才炸。"""
+    """形状检查在【写的时候】：坏凭证根本进不了盘，而不是等某天读它时才炸。"""
     with pytest.raises(ValueError):
         save_state({"nope": 1}, root=tmp_path)
     assert not state_path(root=tmp_path).exists()
 
 
 def test_cookies_filtered_by_domain():
-    """★ 别的域的 cookie 不许带出去（那是把别人家的凭据也交出去）。"""
+    """别的域的 cookie 不许带出去（那是把别人家的凭据也交出去）。"""
     cookies = cookies_from_state(_state(), domains=("ncss.cn",))
     assert cookies == {"SESSION": "abc", "cna": "def"}
 
 
 def test_parent_domain_token_matches_subdomains():
-    """★ `.ncss.cn` 与 `www.ncss.cn` 都要命中父域片段 ——
-    拿完整主机名去比会一个都匹配不上，而后果（空 cookie → 302）
-    看起来像"刚存的登录态就过期了"，归因指向完全错误的方向。"""
+    """`.ncss.cn` 与 `www.ncss.cn` 都要命中父域片段 ——"""
     assert set(cookies_from_state(_state(), domains=("ncss.cn",))) == {"SESSION", "cna"}
 
 
 def test_state_holds_no_credentials(tmp_path):
-    """★ 钉住一条【结构性】承诺：落盘的只有 cookie，没有账号密码。
-
-    `storage_state` 里根本没有放 password 的格子 —— 主人是在浏览器窗口里
-    手工输入的（PLAN §M2 硬约定）。这条断言是那句话的可执行版本。
-    """
+    """钉住一条【结构性】承诺：落盘的只有 cookie，没有账号密码。"""
     save_state(_state(), root=tmp_path)
     raw = state_path(root=tmp_path).read_text(encoding="utf-8").lower()
     assert "password" not in raw
@@ -156,7 +132,7 @@ def test_state_holds_no_credentials(tmp_path):
 
 
 def test_state_age(tmp_path):
-    assert state_age_seconds(root=tmp_path) is None  # 还没有
+    assert state_age_seconds(root=tmp_path) is None
     save_state(_state(), root=tmp_path)
     age = state_age_seconds(root=tmp_path)
     assert age is not None and 0 <= age < 60

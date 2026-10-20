@@ -1,9 +1,4 @@
-"""trace 单测 —— 一行一条、保留键护栏、ts 的来源、覆盖写。
-
-★ 保留键护栏（extra 撞固定列名 → ValueError）不是洁癖：静默覆盖会把真正的
-  step 顶掉，而 trace 看上去还挺正常。这条雷是 m4b 真拦下过的（子 run 的 id
-  想冒充整次 run 的 id），所以在这里留一条独立的回归。
-"""
+"""trace 单测 —— 一行一条、保留键护栏、ts 的来源、覆盖写。"""
 
 from __future__ import annotations
 
@@ -69,7 +64,7 @@ def test_overwrite_not_append(tmp_path):
     two = [StepRecord(step=0, kind="llm"), StepRecord(step=0, kind="tool")]
     write_trace("r", two, root=tmp_path)
     write_trace("r", [StepRecord(step=0, kind="llm")], root=tmp_path)
-    assert len(_lines(tmp_path, "r")) == 1  # 追加的话这里是 3，读起来像"跑了两趟"
+    assert len(_lines(tmp_path, "r")) == 1
 
 
 def test_run_id_stamped_on_every_line(tmp_path):

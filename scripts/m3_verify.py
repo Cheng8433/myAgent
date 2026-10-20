@@ -1,13 +1,4 @@
-"""M3 验收脚本 —— 用【假 LLM】把 ReAct 循环逼到每一条边界上。
-
-为什么不用真模型来测：
-  真模型的"发挥"会让断言时灵时不灵。我们要验的是【循环的逻辑】，
-  不是模型的脾气。假 Provider 每次返回剧本里写好的响应，结果完全确定 ——
-  而且它还会把每次收到的 messages 记下来，供我们检查"到底回灌了什么"。
-
-运行：
-    PYTHONUTF8=1 ./.venv/Scripts/python.exe scripts/m3_verify.py
-"""
+"""M3 验收脚本 —— 用【假 LLM】把 ReAct 循环逼到每一条边界上。"""
 
 import json
 import os
@@ -25,26 +16,13 @@ from agent.tools.registry import TOOLS, tool
 
 
 def budget_of(max_steps: int) -> Budget:
-    """只卡步数，把另外两道闸放到够不到的地方。
-
-    ★ M3 验的是【循环逻辑】，不是预算。token / wall 闸要是在这里生效，
-      测出来的就不是"循环该不该停"，而是"预算配得够不够大" ——
-      一个实验一次只动一个变量。
-      （#21 给 run_agent 换签名时漏改了这里，8 个调用点全 TypeError；
-       跑新脚本 m4_verify.py 是发现不了的，因为它传的是 budget=。）
-    """
+    """只卡步数，把另外两道闸放到够不到的地方。"""
     return Budget(max_steps=max_steps, max_tokens=10**9, max_wall_seconds=1e9)
-
-
-# ══════════════════════════════════════════════════════════════
-#  测试替身
-# ══════════════════════════════════════════════════════════════
 
 
 class ScriptedLLM:
     """照着剧本走的假 Provider。第 n 次 chat() 返回第 n 条预设响应。"""
 
-    # M6 起协议多了 `model`（trace 拿它做成本归因）；假 Provider 也要报一个。
     model = "scripted-fake"
 
     def __init__(self, responses: list[LLMResponse]) -> None:
@@ -58,9 +36,6 @@ class ScriptedLLM:
         return self._script.pop(0)
 
 
-# ★ 假 Provider 也必须遵守 LLMProvider 契约第 3 条：回填真实 token 用量。
-#   这里填固定的非零值，循环那头才验得出"有没有在累加"。
-#   （早先这俩函数忘了填，默认 0 —— 于是断言在冤枉循环，而不是循环真的漏了累加。）
 FAKE_PROMPT_TOKENS = 100
 FAKE_COMPLETION_TOKENS = 10
 
@@ -117,7 +92,7 @@ def register_fake(
         return result
 
     fake.__name__ = name
-    fake.__doc__ = f"测试用假工具 {name}。"  # 空描述会被 ToolSpec 直接拒绝
+    fake.__doc__ = f"测试用假工具 {name}。"
     tool(args_model=args_model)(fake)  # type: ignore[call-arg]
 
 
@@ -127,11 +102,6 @@ def last_tool_message(llm: ScriptedLLM, round_index: int = 1) -> dict:
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     assert tool_msgs, f"第 {round_index} 轮没有回灌任何 tool 消息 —— 模型会原地打转"
     return json.loads(tool_msgs[-1]["content"])
-
-
-# ══════════════════════════════════════════════════════════════
-#  检查项
-# ══════════════════════════════════════════════════════════════
 
 
 def check_assistant_message_shape() -> None:
@@ -146,8 +116,6 @@ def check_assistant_message_shape() -> None:
     assert msg["role"] == "assistant"
     assert msg["content"] == "", f"content 为 None 时必须归一化成 ''，实际 {msg['content']!r}"
 
-    # ★ 多余字段：DeepSeek 容忍，但别家可能 400。
-    #   M1 那句"换供应商只改 .env"要靠这种纪律才守得住。
     assert set(msg) == {"role", "content", "tool_calls"}, (
         f"assistant 消息里混进了非协议字段：{sorted(set(msg) - {'role', 'content', 'tool_calls'})}"
     )
@@ -172,9 +140,6 @@ def check_happy_path() -> None:
 
     assert result.status == "success", f"应正常结束，实际 {result.status}"
     assert result.answer == "做完了"
-    # ★ 卡【具体数字】而不是 > 0：跑了 2 轮，每轮假 Provider 报 100+10，
-    #   结果就必须是 200 / 20。卡住数字才抓得到"少累加一轮"或
-    #   "把单步用量和累计用量写反"这类偏移。
     assert len(llm.calls) == 2, f"应问模型 2 次，实际 {len(llm.calls)} 次"
     expected_prompt = FAKE_PROMPT_TOKENS * len(llm.calls)
     expected_completion = FAKE_COMPLETION_TOKENS * len(llm.calls)
@@ -185,10 +150,6 @@ def check_happy_path() -> None:
         f"用量应为 {expected_prompt}/{expected_completion}，实际 "
         f"{result.prompt_tokens}/{result.completion_tokens} —— 没累加，或累加了错的东西"
     )
-    # ★ 单步留痕必须是【这一轮】的用量，不是累计值 —— 否则 M6 的成本归因
-    #   会把第 2 步读成"这一步就烧了 200 token"，画出来的曲线全是假的。
-    #   （这里卡的是"每一条都等于单轮值"，而不是"末条等于累计值" ——
-    #     后者恰恰是在给 bug 开绿灯，抚子第一版就写错了。）
     llm_steps = [s for s in result.steps if s.kind == "llm"]
     assert llm_steps, "没有留下 llm 步的痕迹"
     assert all(s.prompt_tokens == FAKE_PROMPT_TOKENS for s in llm_steps), (
@@ -201,19 +162,14 @@ def check_happy_path() -> None:
         f"{[s.completion_tokens for s in llm_steps]}"
     )
 
-    # ★ 考点：成功路径上工具必须【恰好执行一次】。
-    #   多执行一次 = 一次抓取变两次、一条飞书变两条（write 工具会出真事故）。
     assert EXECUTED.count("fake_ok") == 1, (
         f"工具被执行了 {EXECUTED.count('fake_ok')} 次，应恰好 1 次"
     )
 
     fed = last_tool_message(llm)
     assert fed["ok"] is True
-    # ★ 考点：成功时工具自己的返回值要【原样透传】，循环不该再套一层壳。
-    #   套了壳的话，真实数据会藏进 result["result"] 里，模型要多绕一层才读得到。
     assert "items" in fed, f"工具返回值被套了壳，模型看到的是 {sorted(fed)}"
 
-    # tool_call_id 必须和点单时的一一对应
     tool_msgs = [m for m in llm.calls[1] if m.get("role") == "tool"]
     assert len(tool_msgs) == 1, f"只点了 1 单却回灌了 {len(tool_msgs)} 条"
     assert tool_msgs[0]["tool_call_id"] == "call_0", "tool_call_id 对不上，真接口会 400"
@@ -277,7 +233,6 @@ def check_tool_crash() -> None:
 def check_loop_detection() -> None:
     print("\n═══ 6. 原地打转 → loop_detected（而不是烧光 token）═══")
     register_fake("fake_fail", {"ok": False, "error": "boom", "hint": "没救了"})
-    # 剧本给足 10 轮；如果循环没打断，它会一直问到剧本用完
     llm = ScriptedLLM([wants(("fake_fail", "{}")) for _ in range(10)])
 
     result = run_agent(
@@ -314,7 +269,6 @@ def check_repeat_limit_is_configurable() -> None:
     )
 
     assert result.status == "loop_detected", f"应触发死循环检测，实际 {result.status}"
-    # ★ 这里卡 3 不卡 2：写死 2 的实现在上一项照样过，只有参数一变才露馅。
     assert len(llm.calls) == 3, (
         f"repeat_limit=3 应在第 3 轮打断，实际问了 {len(llm.calls)} 轮 —— "
         "是不是把 repeat_limit 写死成了 2？"
@@ -325,7 +279,6 @@ def check_repeat_limit_is_configurable() -> None:
 def check_max_steps() -> None:
     print("\n═══ 7. 参数每轮不同 → 走 max_steps（不能误判成死循环）═══")
     register_fake("fake_page", {"ok": True}, args_model=_PageArgs)
-    # 每轮参数都不同 —— 这是【合法】的连续调用（比如翻页），不该被当成打转
     llm = ScriptedLLM([wants(("fake_page", json.dumps({"page": i}))) for i in range(1, 11)])
 
     result = run_agent(
@@ -345,13 +298,7 @@ def check_max_steps() -> None:
 
 
 def check_real_tool() -> bool:
-    """真实链路只有这一项验得到。返回 True 表示【真的验过了】。
-
-    ★ 这里曾经写的是 `print("跳过：没有 LLM_API_KEY")` + return —— 而且脚本
-      压根没调 load_dotenv()，于是 .env 里明明有 key，这一项也永远"跳过"，
-      末尾照样打 ✅。两处毛病叠在一起就成了【假绿灯】：绿的是"其余 7 项"，
-      读的人却以为是"整条链路"。跳过必须是响的，不是哑的。
-    """
+    """真实链路只有这一项验得到。返回 True 表示【真的验过了】。"""
     print("\n═══ 8. 真实工具体验（走真模型，验真链路）═══")
     if not os.environ.get("LLM_API_KEY"):
         print("  ✗ 未验证：环境里没有 LLM_API_KEY（.env 里有的话，检查 load_dotenv 调了没）")
@@ -377,8 +324,6 @@ def check_real_tool() -> bool:
 
 
 def main() -> None:
-    # ★ 先 load_dotenv：上面那个"没 key 就跳过"的分支，之前因为缺这一行
-    #   而永远成立 —— 环境变量只在 .env 里，os.environ 里当然没有。
     load_dotenv()
 
     check_assistant_message_shape()
@@ -390,7 +335,6 @@ def main() -> None:
     check_repeat_limit_is_configurable()
     check_max_steps()
     if not check_real_tool():
-        # ★ 退出码 2 而不是 0：没验过 ≠ 通过。让 CI / 一眼扫过的人都看得见。
         print("\n⚠️ 前 7 项通过，但【端到端链路未验证】—— 这不是全绿。")
         raise SystemExit(2)
     print("\n✅ M3 通过：循环的出口、回灌、三种终止条件、以及真实链路都守住了。")
