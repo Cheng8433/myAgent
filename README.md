@@ -33,7 +33,8 @@
 - [x] M5 状态管理：SQLite 建库 + 幂等写入 + 内容寻址存档 —— `scripts/m5_verify.py`
 - [x] M6 可观测：三层日志（`app.log` / `llm.log` / `var/traces/*.jsonl`）+ 成本看板 —— `scripts/m6_verify.py`
 - [x] M7 评估：三层（L1 `pytest` 回归网 · L2 离线回放 · L3 摘要性质断言）—— `pytest` + `python -m eval.run_eval`
-- [ ] M8 安全与护栏 —— ✅ **五条已落地（2026-10-20）**：① 工具白名单从"只影响说明书"变成**真正拦住执行**（`tool_not_allowed`，未授权工具不会被执行、也不会发请求）；② 网页内容隔离（`guardrails/untrusted.py`，正则中和闭合标签 + 8000 字符上限；`eval/injection.py` 三条跨层断言）；③ 出站脱敏补手机号 / 身份证 / 邮箱（13 位毫秒时间戳不误伤）；④ 翻页节流 ≥3s + 抖动（只对 ncss、只从第 2 页起）；⑤ 一天一次（东八区当天判，`login_expired` 不占额度，续期后可立刻重跑）。验收：`scripts/m8_verify.py` + `pytest` 156 条 + `eval.run_eval` 的 L2b。⏸ **飞书推送按主人决定暂缓**（在电脑上看结果即可）—— 告警目前由日志 + 结构化退出码承担，这是一笔明确的欠账。**M9 部署**仍未开始。
+- [ ] M8 安全与护栏 —— ✅ **五条已落地（2026-10-20）**：① 工具白名单从"只影响说明书"变成**真正拦住执行**（`tool_not_allowed`，未授权工具不会被执行、也不会发请求）；② 网页内容隔离（`guardrails/untrusted.py`，正则中和闭合标签 + 8000 字符上限；`eval/injection.py` 三条跨层断言）；③ 出站脱敏补手机号 / 身份证 / 邮箱（13 位毫秒时间戳不误伤）；④ 翻页节流 ≥3s + 抖动（只对 ncss、只从第 2 页起）；⑤ 一天一次（东八区当天判，`login_expired` 不占额度，续期后可立刻重跑）。验收：`scripts/m8_verify.py` + `pytest` 156 条 + `eval.run_eval` 的 L2b。⏸ **飞书推送按主人决定暂缓**（在电脑上看结果即可）—— 告警目前由日志 + 结构化退出码承担，这是一笔明确的欠账（部署现状见下一行）。
+- [x] M9 部署与回滚 —— **（2026-10-20）**：① 单实例 `var/app.lock`（OS 级文件锁，进程死亡自动释放、无僵尸锁；撞锁退出码 4）；② 心跳 `var/heartbeat.json` + `python -m app.main status`（最近结局 / 今日额度 / 登录态年龄）；③ 退出码补齐 2 = 配置错误；④ Windows 任务计划程序：`scripts/run_report.cmd` 为唯一入口 + `register_task.ps1` / `unregister_task.ps1`（每天 08:00，`MultipleInstances=IgnoreNew`、错过后补跑）；⑤ 版本 `v0.9.0` + 回滚手册 `docs/DEPLOY.md`、决策 `docs/ADR/001-deploy-windows-task-scheduler.md`。验收：`scripts/m9_verify.py` + `pytest`。⏸ **外部告警（飞书）仍暂缓**；「无人值守连跑 3 天」需要真实时间，尚未验收。
 
 > **M4b 留下的两件事**：① 真链路只跑过一次手工验证，还没被任何脚本盯住 ——
 > `m4b_verify.py` 全程离线（假数据源 + 假 LLM），真实网络/模型的形状由

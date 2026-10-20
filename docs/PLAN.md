@@ -1185,6 +1185,30 @@ git checkout v0.2.0 && pip install -r requirements.txt   # 或 uv sync
 - `docs/ADR/` 里记录「为什么这么改」，回滚时知道回滚掉的是什么
 - 每次上线前**先在本地用 fixture 回放跑一遍评估**（M7 的 L2），通过再部署
 
+> **M9 对账（2026-10-20）**：必备三件事 + 版本回滚全部落地，外部告警仍是一笔明确欠账。
+>
+> | PLAN §M9 | 落点 | 状态 |
+> |---|---|---|
+> | 单实例锁 `var/app.lock` | `src/app/lock.py`：**OS 级文件锁**（Windows `_locking` / POSIX `flock`），`report` 入口 `with` 罩住整个进程 | ✅ |
+> | 心跳 + 外部告警 | 每次 report 结束（成功/失败/登录过期）原子写 `var/heartbeat.json`；`python -m app.main status` 读心跳 + 今日额度 + 登录态年龄 | ⚠️ 本机部分 ✅；**外部推送（飞书）按主人决定暂缓** |
+> | 结构化退出码 | 0 成功/已跑过 · 1 失败 · 2 配置错误 · 3 登录过期 · 4 已有实例在跑 | ✅（2/4 为本轮新增） |
+> | 任务计划程序 | `scripts/run_report.cmd`（唯一入口）+ `register_task.ps1` / `unregister_task.ps1`，每天 08:00，`MultipleInstances=IgnoreNew`、`StartWhenAvailable` | ✅ |
+> | 版本与回滚 | `v0.9.0` tag；`docs/DEPLOY.md` §6 | ✅ |
+>
+> ★ 锁的两个决定是这次的重点：(a) 用 **OS 锁**而不是"锁文件存在即占用"——
+> 后者在进程被 kill 后留下**僵尸锁**，以后每天的任务都以为"还在跑"而静静退出，
+> 且看起来完全正常；OS 锁的所有权属于进程，死亡即释放。
+> (b) 实测 Windows 字节锁会把**整段读取**也挡掉（持有者 `read_text()` 拿
+> PermissionError），所以 `LockBusy` 消息不附锁文件内容 —— pid 记录只在释放后
+> 作为事后线索，判据永远是锁本身。
+> ★ 退出码 2/4 是给任务计划程序读的契约：配置错误和"另一个实例在跑"都不该
+> 长得像"抓取失败"，否则每次都要先去翻错日志。
+> ★ 心跳的本机化不是替代品：它回答"最近跑没跑"，但人不在电脑前时不会主动喊人。
+> `docs/DEPLOY.md` §5 照实写明这一点，不把"做了本机心跳"说成"告警已完成"。
+> ★ 验收：`scripts/m9_verify.py`（离线：锁互斥/释放/异常释放、退出码 2、心跳往返与
+> 损坏识别、status 只读、部署件齐全）+ `pytest`（新增 `test_lock` / `test_heartbeat` /
+> `test_cli`）。⚠️ "无人值守连跑 3 天"这条 PLAN 原定的验收需要真实时间，尚未完成。
+
 ### 自测题
 > 部署后连续两天没收到日报。你怎么区分「Agent 没跑」「跑了但没数据」「跑了但告警也挂了」这三种情况？
 

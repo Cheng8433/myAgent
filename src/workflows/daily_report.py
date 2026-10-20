@@ -74,12 +74,12 @@ STATUS_ALREADY_RAN = "already_ran"
 ★ already_ran（M8 的一天一次）：
   它不是失败，但也不是"今天出过日报"—— 所以单独一个词，让 CLI 能打一句
   "今天已经跑过，本次未重复抓取"，而不是伪装成 success / no_items。
-  ★ 计入额度的只有 `_DAILY_CAP_STATUSES` 那三个；already_ran 自己【不计入】，
+  ★ 计入额度的只有 `DAILY_CAP_STATUSES` 那三个；already_ran 自己【不计入】，
     否则第一次跳过之后，今天剩下的每一次都会被上一条跳过记录挡回去 ——
     跳过会自我延续。
 """
 
-_DAILY_CAP_STATUSES = (STATUS_SUCCESS, STATUS_NO_ITEMS, STATUS_FAILED)
+DAILY_CAP_STATUSES = (STATUS_SUCCESS, STATUS_NO_ITEMS, STATUS_FAILED)
 """哪几种结局算"今天已经抓过了"。
 
 ★ STATUS_FAILED 计入：失败可能发生在抓完之后（入库 / 摘要阶段），
@@ -431,11 +431,11 @@ def run_daily_report(
     # ★ 位置是契约：必须在【任何抓取之前】。放到抓完再判，等于礼貌规则
     #   只在"抓过一次之后"生效 —— 而重复请求恰恰是发生在抓取这一步。
     # ★ 判据是"今天有没有跑过"，不是"今天有没有出过报告"：failed 也算
-    #   （见 _DAILY_CAP_STATUSES 的注释），login_expired 不算。
+    #   （见 DAILY_CAP_STATUSES 的注释），login_expired 不算。
     # ★ 跳过也要留痕（走同一个 finish）：它回答的是"今天为什么没跑"。
     #   而它自己的 status=already_ran 不在计入集合里 —— 跳过不会自我延续。
     if src.name in POLITE_SOURCES and ran_since(
-        conn, since=day_start_utc(), statuses=_DAILY_CAP_STATUSES
+        conn, since=day_start_utc(), statuses=DAILY_CAP_STATUSES
     ):
         records.append(
             StepRecord(

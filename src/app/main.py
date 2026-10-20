@@ -29,8 +29,17 @@ if TYPE_CHECKING:
 
 EXIT_OK = 0
 EXIT_FAILED = 1
+EXIT_CONFIG = 2
 EXIT_LOGIN_EXPIRED = 3
-"""0 成功 / 1 失败 / 3 登录过期 —— 照抄 PLAN.md §M2 已定的约定。
+EXIT_BUSY = 4
+"""0 成功 / 1 失败 / 2 配置错误 / 3 登录过期 / 4 已有实例在跑。
+
+★ 2 与 4 是 M9 补上的两个出口：
+  · 2 配置错误 —— 代码里没有默认值，缺变量 / 空串 / 类型错都在启动时抛
+    ConfigError（见 agent/config.py）。在这之前它会以 Python 未捕获异常的
+    身份退出（码 1），于是"该去改 .env"和"该去看抓取日志"长得一模一样。
+  · 4 已有实例在跑 —— 上一次还没跑完时本次主动退出（app/lock.py）。
+    对任务计划程序来说它不是失败（重试只会再撞一次锁），所以不归进 1。
 
 ★ 用常量而不是散落的裸数字：`sys.exit(3)` 里的 3 是魔法数字，
   读代码的人得回去翻 PLAN 才知道它什么意思；常量名自带意思。
@@ -96,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument(
         "--timeout", type=float, default=600.0, help="等主人完成登录的秒数（默认 600）"
     )
+    sub.add_parser(
+        "status",
+        help="看最后一次运行的心跳、今日额度与登录态年龄（只读，不抓取）",
+    )
     board = sub.add_parser("board", help="看最近几天的成本与健康度（只读，不写任何文件）")
     # ★ 默认值写成整数 7 而不是 "7"：type=int 负责把用户敲的字符串转过来，
     #   而 default 不经过 type —— 写成 "7" 的话，不传 --days 时拿到的是字符串，
@@ -157,6 +170,12 @@ def _report_outcome(report: DailyReport) -> int:
 def cmd_report() -> int:
     """跑一次日报，返回退出码。
 
+    ★ M9 起这里是【单实例】的：先拿 var/app.lock，拿不到就直接退（EXIT_BUSY）。
+      锁必须在建库、抓取之前 —— 两个进程同时翻页等于对同一个实名账号的请求量
+      翻倍，而「一天一次」（M8）只治跨天的频率，管不住同一天里的并发。
+      OS 锁在进程死亡时由内核释放，所以不存在"僵尸锁把以后每天的任务都卡死"
+      这种病（理由见 app/lock.py 顶部）。
+
     ★ 为什么 import 写在函数里而不是模块顶部：
       将来 `login` 子命令要 playwright、别的子命令可能要别的 ——
       顶部 import 会让"只跑 report"也把无关依赖全拉起来。
@@ -167,16 +186,35 @@ def cmd_report() -> int:
     """
     from dotenv import load_dotenv
 
+    # ★ 先 load_dotenv 再碰任何 getenv：配置只在 .env 里，os.environ 里当然没有。
+    #   （m3_verify 就在这上面栽过 —— .env 里明明有 key，"没 key 就跳过"那一支
+    #     却永远成立，于是端到端那项永远静默跳过、末尾照样打 ✅。跳过必须是响的。）
+    #   VAR_DIR 也是从 .env 来的，所以锁路径必须在它之后算。
+    load_dotenv()
+
+    from agent.memory.store import var_dir
+    from app.lock import LOCK_FILE, LockBusy, exclusive_lock
+
+    try:
+        with exclusive_lock(var_dir() / LOCK_FILE):
+            return _report_locked()
+    except LockBusy as exc:
+        print(f"本次未启动：{exc}")
+        print("上一次日报还没结束，本次直接退出（不重试、不叠加）。")
+        return EXIT_BUSY
+
+
+def _report_locked() -> int:
+    """锁内的一次完整 report：建库 → 跑流程 → 讲结局 → 写心跳。
+
+    ★ 拆出来只为让锁的边界一眼可见：`with` 块里没有一个字，所有动作在
+      这个函数里；锁罩住的是【整个进程要做的事】，不是某一步。
+    """
     from agent.llm.openai_compat import OpenAICompatProvider
     from agent.memory.db import connect, ensure_schema, new_run_id
     from agent.observability.logs import LoggedProvider, configure_logging, shutdown_logging
     from agent.runtime.budget import Budget
     from workflows.daily_report import run_daily_report
-
-    # ★ 先 load_dotenv 再碰任何 getenv：配置只在 .env 里，os.environ 里当然没有。
-    #   （m3_verify 就在这上面栽过 —— .env 里明明有 key，"没 key 就跳过"那一支
-    #     却永远成立，于是端到端那项永远静默跳过、末尾照样打 ✅。跳过必须是响的。）
-    load_dotenv()
 
     # ★ 日志必须在 run_daily_report 【之前】接上：那之后打的业务事件
     #   （fetch_done / store_done / report_finished）才有个去处。
@@ -196,6 +234,11 @@ def cmd_report() -> int:
             run_id=new_run_id(),
             budget=Budget.from_env(),
         )
+        # ★ 讲结局与写心跳放在 finally 【之前】：shutdown_logging 之后
+        #   structlog 已被设成 ReturnLogger，心跳那条日志会被静默吞掉。
+        code = _report_outcome(report)
+        _write_heartbeat(report, code)
+        return code
     finally:
         # ★ finally 而不是"正常路径上 close"：中途抛异常时连接才不会漏掉。
         #   进程退出会回收 fd，但显式关掉是把"这里就是它的终点"写在代码上。
@@ -205,7 +248,35 @@ def cmd_report() -> int:
         #   会盖住真正的失败（见 logs.shutdown_logging）。
         shutdown_logging()
 
-    return _report_outcome(report)
+
+def _write_heartbeat(report: DailyReport, exit_code: int) -> None:
+    """把这一次的结局写进 var/heartbeat.json（成功/失败都写）。
+
+    ★ 写失败【不改变退出码】：日报已经落盘，心跳只是给它配一块钟面。
+      但必须响亮地说出来 —— 静默少一块钟面，等于把"以后看不到它跑没跑"
+      这件事也悄悄藏起来。
+    """
+    from datetime import UTC, datetime
+
+    from app.heartbeat import write_heartbeat
+
+    payload = {
+        "at": datetime.now(UTC).isoformat(),
+        "run_id": report.run_id,
+        "status": report.status,
+        "exit_code": exit_code,
+        "detail": report.detail,
+        "report_path": report.report_path,
+        "source": os.getenv("JOB_SOURCE", "remoteok").strip().lower(),
+    }
+    try:
+        rel = write_heartbeat(payload)
+    except OSError as exc:
+        print(f"⚠️ 心跳写入失败（日报本身已完成）：{exc}")
+        return
+    from agent.observability.logs import log
+
+    log.info("heartbeat_written", path=rel, status=report.status, exit_code=exit_code)
 
 
 def cmd_board(days: int = 7) -> int:
@@ -235,6 +306,98 @@ def cmd_board(days: int = 7) -> int:
         conn.close()
 
     print(render_board(daily, errors, days=days))
+    return EXIT_OK
+
+
+def _hours_since(iso: str | None) -> float | None:
+    """ISO 时间戳距现在多少小时；解析不了返回 None。
+
+    ★ 纯函数、返回 None 而不是抛：它服务的是 status 的展示，
+      一个被手改坏的心跳文件不该让"看一眼状态"这件事本身失败。
+      但它也不是静默的 —— 调用方会把"时间未知"打出来。
+    """
+    from datetime import UTC, datetime
+
+    if not iso:
+        return None
+    try:
+        moment = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - moment).total_seconds() / 3600
+
+
+def cmd_status() -> int:
+    """回答"它最近跑没跑、今天还能不能跑、登录态多旧了" —— 只读，不抓取。
+
+    ★ 为什么要有它：PLAN §M9 的心跳要求"成功也推一条"，因为「没消息」
+      和「挂了」无法区分。本轮不做外部推送，本机能给出的最小等价物就是：
+      一个【有时间的钟面】+ 一条【可执行的下一次动作】。
+      主人打开电脑跑一次 status，就知道该不该续期、今天额度还在不在。
+
+    ★ 只读：不 configure_logging（同 cmd_board），不写心跳、不写库。
+      ensure_schema 是唯一的写入面，且幂等（刚 clone 的机器上它建空表，
+      否则查询会抛 no such table，让"还没跑过"长得像故障）。
+    """
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    from agent.memory.db import connect, ensure_schema
+    from agent.memory.store import ran_since
+    from agent.tools.auth import LOGIN_HINT, state_age_seconds, state_path
+    from app.heartbeat import heartbeat_path, read_heartbeat
+    from workflows.daily_report import DAILY_CAP_STATUSES
+    from workflows.report import day_start_utc
+
+    source = os.getenv("JOB_SOURCE", "remoteok").strip().lower()
+    print("== myAgent 状态 ==")
+    print(f"数据源：{source}")
+
+    conn = connect()
+    try:
+        ensure_schema(conn)
+        today_used = ran_since(conn, since=day_start_utc(), statuses=DAILY_CAP_STATUSES)
+    finally:
+        conn.close()
+
+    if source == "ncss":
+        # 只有实名账号的源受"一天一次"约束；替身源不该陪跑这条规则。
+        print(f"今日额度（东八区）：{'已使用' if today_used else '未使用'}")
+    else:
+        print("今日额度：开发期替身源不受「一天一次」限制")
+
+    beat_path = heartbeat_path()
+    try:
+        beat = read_heartbeat()
+    except (OSError, ValueError) as exc:
+        print(f"心跳：⚠️ 读不出来 —— {exc}")
+    else:
+        if beat is None:
+            print(f"心跳：还没有记录（{beat_path} 不存在，说明本机还没跑完过一次 report）")
+        else:
+            age = _hours_since(beat.get("at"))
+            age_text = f"{age:.1f} 小时前" if age is not None else "时间未知"
+            print(
+                f"心跳：{beat.get('at')}  status={beat.get('status')}  "
+                f"exit={beat.get('exit_code')}  ({age_text})"
+            )
+            if beat.get("report_path"):
+                print(f"报告：{beat.get('report_path')}")
+            if beat.get("detail"):
+                print(f"说明：{beat.get('detail')}")
+
+    p = state_path()
+    if p.exists():
+        hours = state_age_seconds() / 3600
+        print(
+            f"登录态：已保存 {hours:.1f} 小时（{p}）。"
+            "服务端寿命未知；过期时 report 会以退出码 3 提醒续期。"
+        )
+    else:
+        print(f"登录态：还没有（本机没登录过；需要时运行 `{LOGIN_HINT}`）")
     return EXIT_OK
 
 
@@ -335,13 +498,28 @@ def cmd_login(timeout: float = 600.0) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """子命令分发 + 配置错误的统一出口（退出码 2）。
+
+    ★ 只接 ConfigError，不接 Exception：别的异常是我们的 bug 或真正的
+      未预期故障，它们该带着 traceback 炸出来（归因错位是 M4a-1 那个病）。
+      ConfigError 则不同 —— 它已经是一句写给人看的、带变量名的解释，
+      把 traceback 铺在它后面只会让真正要读的那句话淹没在栈里。
+    """
+    from agent.config import ConfigError
+
     args = build_parser().parse_args(argv)
-    if args.command == "report":
-        return cmd_report()
-    if args.command == "board":
-        return cmd_board(args.days)
-    if args.command == "login":
-        return cmd_login(args.timeout)
+    try:
+        if args.command == "report":
+            return cmd_report()
+        if args.command == "status":
+            return cmd_status()
+        if args.command == "board":
+            return cmd_board(args.days)
+        if args.command == "login":
+            return cmd_login(args.timeout)
+    except ConfigError as exc:
+        print(f"配置错误：{exc}", file=sys.stderr)
+        return EXIT_CONFIG
     # argparse 的 required=True 保证走不到这里。写成显式 raise 而不是
     # return EXIT_OK：将来加了子命令却忘了接分支时，宁可当场炸，
     # 也不要静默"成功"。

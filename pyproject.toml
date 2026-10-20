@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "myagent"
-version = "0.1.0"
+version = "0.9.0"
 description = "招聘信息日报 Agent —— 手写 ReAct 循环的学习型项目"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 # 依赖刻意保持精简。以下三样【故意不装】，因为它们是本项目的学习内容：
 #   · tenacity / backoff —— M4 要手写退避重试，才能讲清幂等与抖动
 #   · langchain / langgraph —— 全项目手写 ReAct，不用 Agent 框架
-#   · apscheduler —— M9 部署时再引入，现在不需要
+#   · apscheduler —— M9 选了 Windows 任务计划程序（docs/ADR/001），不需要常驻调度器
 dependencies = [
     "openai>=1.60",        # OpenAI 兼容协议客户端（tool calling 的地基）
     "httpx>=0.27",         # 原生 HTTP：工具层直接抓取 + 测试时可被 mock
